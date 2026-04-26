@@ -38,3 +38,45 @@ LEFT JOIN latest_review lr
     ON lr.artwork_id = m.artwork_id
 LEFT JOIN latest_approval la
     ON la.artwork_id = m.artwork_id;
+
+CREATE OR REPLACE VIEW app.event_records AS
+SELECT
+    event_id,
+    source_name,
+    source_domain,
+    source_url,
+    source_record_id,
+    event_type,
+    event_title,
+    venue_name,
+    venue_address,
+    city,
+    country,
+    start_date,
+    end_date,
+    opening_datetime,
+    description,
+    image_url,
+    artist_count,
+    crawl_timestamp,
+    created_at
+FROM analytics.mart_events;
+
+CREATE OR REPLACE VIEW app.artist_event_links AS
+SELECT
+    artist_activity_id,
+    event_id,
+    artist_name,
+    artist_name_normalized,
+    artist_profile_url,
+    match_type,
+    event_type,
+    event_title,
+    city,
+    country,
+    start_date,
+    end_date,
+    source_domain,
+    source_url,
+    crawl_timestamp
+FROM analytics.mart_artist_activity;

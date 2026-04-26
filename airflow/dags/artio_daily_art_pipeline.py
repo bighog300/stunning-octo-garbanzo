@@ -23,7 +23,14 @@ def _conn():
 
 
 def create_crawl_run(**context):
-    spider_name = context["dag_run"].conf.get("spider_name", "metmuseum_artworks") if context.get("dag_run") else "metmuseum_artworks"
+    if context.get("dag_run"):
+        spider_name = (
+            context["dag_run"].conf.get("spider")
+            or context["dag_run"].conf.get("spider_name")
+            or "metmuseum_artworks"
+        )
+    else:
+        spider_name = "metmuseum_artworks"
     crawl_run_id = str(uuid.uuid4())
 
     with _conn() as conn:

@@ -13,3 +13,27 @@ models:
       - name: source_domain
         tests:
           - not_null
+
+  - name: stg_events
+    columns:
+      - name: raw_event_id
+        tests:
+          - not_null
+          - unique
+      - name: source_url
+        tests:
+          - not_null
+      - name: source_domain
+        tests:
+          - not_null
+
+  - name: stg_event_artists
+    columns:
+      - name: raw_event_artist_id
+        tests:
+          - not_null
+          - unique
+      - name: event_id
+        tests:
+          - not_null
+

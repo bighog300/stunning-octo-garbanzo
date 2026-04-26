@@ -1,0 +1,42 @@
+select
+    e.raw_event_id as event_id,
+    e.source_name,
+    e.source_domain,
+    e.source_url,
+    e.source_record_id,
+    e.event_type,
+    e.event_title,
+    e.venue_name,
+    e.venue_address,
+    e.city,
+    e.country,
+    e.start_date,
+    e.end_date,
+    e.opening_datetime,
+    e.description,
+    e.image_url,
+    count(distinct ea.raw_event_artist_id)::integer as artist_count,
+    e.crawl_timestamp,
+    e.created_at
+from {{ ref('stg_events') }} e
+left join {{ ref('stg_event_artists') }} ea
+    on ea.event_id = e.raw_event_id
+group by
+    e.raw_event_id,
+    e.source_name,
+    e.source_domain,
+    e.source_url,
+    e.source_record_id,
+    e.event_type,
+    e.event_title,
+    e.venue_name,
+    e.venue_address,
+    e.city,
+    e.country,
+    e.start_date,
+    e.end_date,
+    e.opening_datetime,
+    e.description,
+    e.image_url,
+    e.crawl_timestamp,
+    e.created_at
