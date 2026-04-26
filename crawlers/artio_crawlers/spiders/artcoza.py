@@ -35,7 +35,35 @@ class ArtCoZaSpider(scrapy.Spider):
         "exhibitions",
         "events",
         "artists",
+        "training",
     }
+
+    ARTIST_NAME_BLACKLIST = {
+        "art training",
+        "art quiz",
+        "recent work",
+        "featured work",
+        "art in south africa",
+    }
+
+    ARTIST_NAME_CHROME_TOKENS = (
+        "recent work",
+        "featured work",
+        "art in south africa",
+        "| art.co.za",
+        "- art.co.za",
+    )
+
+    EXCLUDED_IMAGE_TOKENS = (
+        "artcoza.jpg",
+        "top-facebook.png",
+        "logo",
+        "icon",
+        "banner",
+        "header",
+        "footer",
+        "nav",
+    )
 
     def __init__(
         self,
@@ -73,6 +101,10 @@ class ArtCoZaSpider(scrapy.Spider):
         self.filtered_artist_profile_links = 0
         self.skipped_non_artist_links = 0
         self.records_per_artist: dict[str, int] = {}
+        self.skipped_invalid_source_url = 0
+        self.skipped_placeholder_image = 0
+        self.skipped_invalid_artist_page = 0
+        self.emitted_records = 0
 
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
@@ -100,7 +132,17 @@ class ArtCoZaSpider(scrapy.Spider):
             yield response.follow(next_page, callback=self.parse)
 
     def parse_artist_profile(self, response: scrapy.http.Response):
+        if not self._is_valid_artcoza_http_url(response.url) or not self._is_artist_profile_url(response.url):
+            self.skipped_invalid_artist_page += 1
+            self.logger.info("Skipped invalid artist page: %s", response.url)
+            return
+
         artist_name = self._extract_artist_name(response)
+        if not self._is_valid_artist_name(artist_name):
+            self.skipped_invalid_artist_page += 1
+            self.logger.info("Skipped invalid artist page name: url=%s artist_name=%s", response.url, artist_name)
+            return
+
         artist_profile_url = response.url
         per_artist_count = 0
 
@@ -187,9 +229,10 @@ class ArtCoZaSpider(scrapy.Spider):
         return deduped_links
 
     def _is_artist_profile_url(self, url: str) -> bool:
-        parsed = urlparse(url)
-        if parsed.netloc not in {"art.co.za", "www.art.co.za"}:
+        if not self._is_valid_artcoza_http_url(url):
             return False
+
+        parsed = urlparse(url)
         if parsed.query or parsed.fragment:
             return False
 
@@ -231,9 +274,12 @@ class ArtCoZaSpider(scrapy.Spider):
         for selector in selectors:
             value = response.css(selector).get()
             if value and value.strip():
-                cleaned = " ".join(value.split())
-                return cleaned.replace("| Art.co.za", "").replace("- Art.co.za", "").strip()
-        return None
+                cleaned = self._clean_artist_name(value)
+                if self._is_valid_artist_name(cleaned):
+                    return cleaned
+
+        slug_name = self._artist_name_from_slug(response.url)
+        return slug_name if self._is_valid_artist_name(slug_name) else None
 
     def _extract_artwork_section_links(self, response: scrapy.http.Response) -> list[str]:
         section_links = response.xpath(
@@ -264,6 +310,10 @@ class ArtCoZaSpider(scrapy.Spider):
             if not image_src:
                 continue
             image_url = response.urljoin(image_src)
+            if not self._is_valid_image_url(image_url):
+                self.skipped_placeholder_image += 1
+                self.logger.debug("Skipped placeholder image: %s", image_url)
+                continue
 
             image_alt = node.xpath(".//img/@alt").get()
             image_title = node.xpath(".//img/@title").get()
@@ -271,8 +321,19 @@ class ArtCoZaSpider(scrapy.Spider):
 
             source_href = node.xpath(".//a[1]/@href").get()
             source_url = response.urljoin(source_href) if source_href else (artist_profile_url or response.url)
+            if not self._is_valid_artcoza_http_url(source_url):
+                self.skipped_invalid_source_url += 1
+                self.logger.debug("Skipped invalid source_url: %s", source_url)
+                continue
+
+            if not self._is_valid_artist_name(artist_name):
+                self.skipped_invalid_artist_page += 1
+                continue
 
             title = self._infer_title(image_url, image_alt, image_title, caption, node)
+            if not title:
+                continue
+            title = title.strip()
             if not title:
                 continue
 
@@ -311,6 +372,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["content_hash"] = content_hash(source_url, image_url or title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
+            self.emitted_records += 1
             yield item
 
     def _extract_profile_artwork_items(
@@ -325,6 +387,11 @@ class ArtCoZaSpider(scrapy.Spider):
             if not image_src:
                 continue
             image_url = response.urljoin(image_src)
+            if not self._is_valid_image_url(image_url):
+                self.skipped_placeholder_image += 1
+                self.logger.debug("Skipped placeholder image: %s", image_url)
+                continue
+
             image_alt = node.xpath("./@alt").get()
             image_title = node.xpath("./@title").get()
             caption = self._first_text(
@@ -338,12 +405,15 @@ class ArtCoZaSpider(scrapy.Spider):
             if not title:
                 continue
 
-            # Skip obvious logos/icons.
-            image_path = urlparse(image_url).path.lower()
-            if any(token in image_path for token in ("logo", "icon", "banner")):
+            source_url = artist_profile_url or response.url
+            if not self._is_valid_artcoza_http_url(source_url):
+                self.skipped_invalid_source_url += 1
+                self.logger.debug("Skipped invalid source_url: %s", source_url)
                 continue
 
-            source_url = artist_profile_url or response.url
+            if not self._is_valid_artist_name(artist_name):
+                self.skipped_invalid_artist_page += 1
+                continue
             dedupe_key = f"{source_url}|{image_url}|{title}"
             if dedupe_key in self._emitted_record_keys:
                 continue
@@ -379,18 +449,71 @@ class ArtCoZaSpider(scrapy.Spider):
             item["content_hash"] = content_hash(source_url, image_url)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
+            self.emitted_records += 1
             yield item
 
     def closed(self, reason: str):
         self.logger.info(
-            "Crawl summary: reason=%s artists_visited=%d artwork_records=%d candidates=%d filtered=%d skipped=%d",
+            "Crawl summary: reason=%s artists_visited=%d artwork_records=%d emitted=%d candidates=%d filtered=%d skipped=%d skipped_invalid_source_url=%d skipped_placeholder_image=%d skipped_invalid_artist_page=%d",
             reason,
             self.artists_seen,
             self.records_seen,
+            self.emitted_records,
             self.candidate_artist_links_found,
             self.filtered_artist_profile_links,
             self.skipped_non_artist_links,
+            self.skipped_invalid_source_url,
+            self.skipped_placeholder_image,
+            self.skipped_invalid_artist_page,
         )
+
+    @staticmethod
+    def _is_valid_artcoza_http_url(url: str | None) -> bool:
+        if not url:
+            return False
+        parsed = urlparse(url)
+        return parsed.scheme in {"http", "https"} and parsed.netloc in {"art.co.za", "www.art.co.za"}
+
+    def _is_valid_image_url(self, image_url: str | None) -> bool:
+        if not self._is_valid_artcoza_http_url(image_url):
+            return False
+        path = urlparse(image_url).path.lower()
+        if not path:
+            return False
+        return not any(token in path for token in self.EXCLUDED_IMAGE_TOKENS)
+
+    @classmethod
+    def _clean_artist_name(cls, value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = " ".join(value.split())
+        lowered = cleaned.lower()
+        for token in cls.ARTIST_NAME_CHROME_TOKENS:
+            idx = lowered.find(token)
+            if idx >= 0:
+                cleaned = cleaned[:idx].strip(" |-–—")
+                lowered = cleaned.lower()
+        return cleaned.strip() or None
+
+    def _artist_name_from_slug(self, url: str) -> str | None:
+        path = urlparse(url).path.strip("/")
+        if not path:
+            return None
+        slug = path.split("/")[0]
+        if slug.lower() in self.NON_ARTIST_ROOT_PATHS:
+            return None
+        return slug.replace("-", " ").replace("_", " ").strip().title() or None
+
+    def _is_valid_artist_name(self, artist_name: str | None) -> bool:
+        cleaned = self._clean_artist_name(artist_name)
+        if not cleaned:
+            return False
+        lowered = cleaned.lower()
+        if lowered in self.ARTIST_NAME_BLACKLIST:
+            return False
+        if "recent work" in lowered or "featured work" in lowered:
+            return False
+        return True
 
     @staticmethod
     def _first_text(node, xpaths: list[str]) -> str | None:
