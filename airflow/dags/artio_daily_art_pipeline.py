@@ -84,7 +84,8 @@ with DAG(
         scrapy crawl {{ dag_run.conf.get('spider_name', 'metmuseum_artworks') }} \
           -a crawl_run_id={{ ti.xcom_pull(task_ids='create_crawl_run') }} \
           -a max_records={{ dag_run.conf.get('max_records', 25) }} \
-          -a max_pages={{ dag_run.conf.get('max_pages', 3) }}
+          -a max_pages={{ dag_run.conf.get('max_pages', 3) }} \
+          -a use_sample_data={{ dag_run.conf.get('use_sample_data', false) }}
         """,
     )
 
