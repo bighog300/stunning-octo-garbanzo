@@ -81,10 +81,18 @@ class MetMuseumSpider(scrapy.Spider):
 
     def start_requests(self):
         if self.use_sample_data:
-            yield from self._iter_sample_items()
+            yield scrapy.Request(
+                url="https://example.com/",
+                callback=self.parse_sample_data,
+                dont_filter=True,
+            )
             return
 
         yield from super().start_requests()
+
+    def parse_sample_data(self, response):
+        del response
+        yield from self._iter_sample_items()
 
     def parse(self, response):
         payload = json.loads(response.text)
