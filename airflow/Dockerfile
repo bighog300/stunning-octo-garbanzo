@@ -7,3 +7,4 @@ RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.9 \
     python-dotenv==1.0.1 \
     itemadapter==0.9.0
+    dbt-postgres==1.8.2
