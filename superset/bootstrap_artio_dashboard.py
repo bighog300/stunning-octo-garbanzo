@@ -109,17 +109,28 @@ class SupersetClient:
         query = {
             "q": json.dumps({
                 "filters": [
-                    {"col": "database", "opr": "eq", "value": database_id},
                     {"col": "schema", "opr": "eq", "value": schema},
                     {"col": "table_name", "opr": "eq", "value": table_name},
                 ],
                 "page": 0,
-                "page_size": 1,
+                "page_size": 100,
             })
         }
         data = self._request("GET", "/api/v1/dataset/", params=query)
         result = data.get("result", [])
-        return result[0] if result else None
+        for dataset in result:
+            if dataset.get("schema") != schema or dataset.get("table_name") != table_name:
+                continue
+
+            dataset_database_id = dataset.get("database", {}).get("id")
+            if dataset_database_id is None:
+                dataset_database_id = dataset.get("database_id")
+            if dataset_database_id is None:
+                dataset_database_id = dataset.get("database")
+
+            if dataset_database_id is None or dataset_database_id == database_id:
+                return dataset
+        return None
 
     def create_dataset(self, database_id: int, schema: str, table_name: str) -> int:
         payload = {
