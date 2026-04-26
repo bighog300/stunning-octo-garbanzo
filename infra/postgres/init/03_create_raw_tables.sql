@@ -55,9 +55,16 @@ CREATE TABLE IF NOT EXISTS raw.artworks (
     content_hash TEXT,
     crawl_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at TIMESTAMPTZ,
-    UNIQUE (source_domain, source_url)
+    updated_at TIMESTAMPTZ
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS artworks_source_domain_source_record_id_key
+    ON raw.artworks (source_domain, source_record_id)
+    WHERE source_record_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS artworks_source_domain_source_url_null_record_id_key
+    ON raw.artworks (source_domain, source_url)
+    WHERE source_record_id IS NULL;
 
 CREATE TABLE IF NOT EXISTS raw.artists (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

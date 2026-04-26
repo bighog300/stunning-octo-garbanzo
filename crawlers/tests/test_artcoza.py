@@ -136,7 +136,7 @@ def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     assert items
     item = items[0]
     assert item["artist_name"] == "Jane Doe"
-    assert item["source_url"] == "https://www.art.co.za/jane-doe/artwork/sunset-over-cape-town/"
+    assert item["source_url"] == "https://www.art.co.za/jane-doe/"
     assert item["image_url"] == "https://www.art.co.za/jane-doe/images/sunset.jpg"
     assert item["source_domain"] == "art.co.za"
 

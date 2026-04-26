@@ -14,9 +14,15 @@ def get_connection():
 
 
 def upsert_artwork(conn, item: dict) -> None:
+    has_source_record_id = bool(item.get("source_record_id"))
+    conflict_target = (
+        "(source_domain, source_record_id) WHERE source_record_id IS NOT NULL"
+        if has_source_record_id
+        else "(source_domain, source_url) WHERE source_record_id IS NULL"
+    )
     with conn.cursor() as cur:
         cur.execute(
-            '''
+            f'''
             INSERT INTO raw.artworks (
                 crawl_run_id,
                 source_name,
@@ -63,7 +69,7 @@ def upsert_artwork(conn, item: dict) -> None:
                 %(content_hash)s,
                 %(crawl_timestamp)s
             )
-            ON CONFLICT (source_domain, source_url)
+            ON CONFLICT {conflict_target}
             DO UPDATE SET
                 artist_name = EXCLUDED.artist_name,
                 artwork_title = EXCLUDED.artwork_title,
