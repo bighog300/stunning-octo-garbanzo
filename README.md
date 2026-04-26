@@ -84,3 +84,22 @@ password: admin
 ## Docs
 
 Place the downloaded canvas docs inside `/docs`.
+
+## Superset dashboard bootstrap
+
+Copy the bootstrap assets into the Superset container volume and run the CLI:
+
+```bash
+docker compose cp superset/bootstrap_artio_dashboard.py superset:/app/superset_home/bootstrap_artio_dashboard.py
+docker compose cp superset/artio_dashboard_queries.sql superset:/app/superset_home/artio_dashboard_queries.sql
+docker compose exec superset python /app/superset_home/bootstrap_artio_dashboard.py
+```
+
+Environment variables read by the script (defaults shown):
+
+```text
+SUPERSET_URL=http://superset:8088
+SUPERSET_USERNAME=admin
+SUPERSET_PASSWORD=admin
+ARTIO_DATABASE_URI=postgresql://postgres:postgres@postgres:5432/artio
+```
