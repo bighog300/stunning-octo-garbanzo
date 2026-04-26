@@ -135,3 +135,77 @@ def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     assert item["source_url"] == "https://www.art.co.za/jane-doe/artwork/sunset-over-cape-town/"
     assert item["image_url"] == "https://www.art.co.za/images/sunset.jpg"
     assert item["source_domain"] == "art.co.za"
+
+
+def test_bad_artist_links_and_schemes_are_excluded() -> None:
+    spider = ArtCoZaSpider(max_artists=10)
+    response = _html_response(
+        "https://www.art.co.za/artists/",
+        """
+        <html><body>
+            <a href="/artist-good/">Good Artist</a>
+            <a href="/training/">Art Training</a>
+            <a href="/quiz/">Art Quiz</a>
+            <a href="/weblinks/">Weblinks</a>
+            <a href="/myartcoza/">My Artcoza</a>
+            <a href="/index.php">Index</a>
+            <a href="javascript:void(0)">Click</a>
+            <a href="mailto:hello@example.com">Mail</a>
+            <a href="tel:+27112223333">Call</a>
+        </body></html>
+        """,
+    )
+
+    links = spider._extract_artist_profile_links(response)
+    assert links == ["https://www.art.co.za/artist-good/"]
+
+
+def test_placeholder_and_invalid_records_are_skipped() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Recent Work | Featured Work | Art in South Africa | Jane Doe</h1>
+          <article>
+            <a href="javascript:void(0)">details</a>
+            <img src="/artcoza.jpg" alt="placeholder" />
+          </article>
+          <article>
+            <a href="/jane-doe/artwork/real-piece/">details</a>
+            <img src="/images/top-facebook.png" alt="social" />
+          </article>
+          <article>
+            <a href="/jane-doe/artwork/kept-piece/">details</a>
+            <img src="/images/real-piece.jpg" alt="Golden Sunrise" />
+          </article>
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+
+    assert len(items) == 1
+    assert items[0]["source_url"] == "https://www.art.co.za/jane-doe/"
+    assert items[0]["image_url"] == "https://www.art.co.za/images/real-piece.jpg"
+    assert items[0]["artist_name"] == "Jane Doe"
+    assert spider.skipped_placeholder_image >= 2
+
+
+def test_invalid_artist_page_name_is_rejected() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/training/",
+        """
+        <html><body>
+          <h1>Art Training</h1>
+          <img src="/images/work1.jpg" alt="Some Art" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert items == []
+    assert spider.skipped_invalid_artist_page >= 1
