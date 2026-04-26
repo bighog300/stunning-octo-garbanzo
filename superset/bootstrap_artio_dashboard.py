@@ -134,7 +134,7 @@ class SupersetClient:
             db_id = dataset.get("database_id")
             return db_id if isinstance(db_id, int) else None
 
-        # Prefer exact table_name + schema match.
+        # Prefer exact table_name + schema match on the requested database.
         schema_matches = [
             dataset for dataset in matching_by_table_name if dataset.get("schema") == schema
         ]
@@ -142,6 +142,19 @@ class SupersetClient:
             db_id = dataset_database_id(dataset)
             if db_id is None or db_id == database_id:
                 return dataset
+
+        # Special-case app.artwork_records to avoid creating duplicates when the
+        # dataset already exists under a different Superset database id.
+        if schema == DATASET_SCHEMA and table_name == DATASET_TABLE:
+            for dataset in schema_matches:
+                db_id = dataset_database_id(dataset)
+                if db_id is not None and db_id != database_id:
+                    print(
+                        "[warning] Dataset app.artwork_records already exists under "
+                        f"Superset database id={db_id}; reusing existing dataset id={dataset.get('id')} "
+                        f"instead of creating one for database id={database_id}."
+                    )
+                    return dataset
 
         # If schema key is absent, fall back to table_name-only match.
         schema_missing_matches = [
