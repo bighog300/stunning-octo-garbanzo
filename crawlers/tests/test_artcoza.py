@@ -9,7 +9,7 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
 def _html_response(url: str, html: str) -> TextResponse:
     request = Request(url=url)
-    return TextResponse(url=url, request=request, body=html.encode('utf-8'), encoding='utf-8')
+    return TextResponse(url=url, request=request, body=html.encode("utf-8"), encoding="utf-8")
 
 
 def _fixture(name: str) -> str:
@@ -30,13 +30,34 @@ def test_artist_links_are_extracted_from_directory_html() -> None:
         _fixture("artcoza_artists_directory.html"),
     )
 
-    requests = list(spider.parse(response))
-    urls = [req.url for req in requests]
+    links = spider._extract_artist_profile_links(response)
 
-    assert "https://www.art.co.za/nickyliebenberg/" in urls
-    assert "https://www.art.co.za/mia-van-wyk/" in urls
-    assert "https://www.art.co.za/artists/A/" not in urls
-    assert "https://www.art.co.za/artists/" not in urls
+    assert "https://www.art.co.za/nickyliebenberg/" in links
+    assert "https://www.art.co.za/mia-van-wyk/" in links
+    assert "https://www.art.co.za/artists/A/" not in links
+
+
+def test_non_artist_links_are_excluded() -> None:
+    spider = ArtCoZaSpider(max_artists=10)
+    response = _html_response(
+        "https://www.art.co.za/artists/",
+        """
+        <html><body>
+            <a href="/hoseamatlou/">Artist</a>
+            <a href="/index.php">index</a>
+            <a href="/weblinks/">weblinks</a>
+            <a href="/artists/">artists</a>
+            <a href="/contact/">contact</a>
+            <a href="/news/">news</a>
+            <a href="/utility.php?id=abc">utility</a>
+        </body></html>
+        """,
+    )
+
+    links = spider._extract_artist_profile_links(response)
+
+    assert links == ["https://www.art.co.za/hoseamatlou/"]
+    assert spider.skipped_non_artist_links == 6
 
 
 def test_parse_respects_max_artists() -> None:
@@ -48,6 +69,21 @@ def test_parse_respects_max_artists() -> None:
 
     requests = list(spider.parse(response))
     assert len(requests) == 1
+
+
+def test_full_crawl_true_disables_artist_cap() -> None:
+    spider = ArtCoZaSpider(max_artists=0, full_crawl=True)
+    response = _html_response(
+        "https://www.art.co.za/artists/",
+        _fixture("artcoza_artists_directory.html"),
+    )
+
+    requests = list(spider.parse(response))
+    urls = [req.url for req in requests]
+
+    assert len(urls) == 2
+    assert "https://www.art.co.za/nickyliebenberg/" in urls
+    assert "https://www.art.co.za/mia-van-wyk/" in urls
 
 
 def test_profile_page_extracts_visible_artwork_images() -> None:
@@ -72,23 +108,23 @@ def test_profile_page_extracts_visible_artwork_images() -> None:
     assert items[0]["source_domain"] == "art.co.za"
 
 
-def test_artwork_item_includes_artist_name_and_image_url() -> None:
+def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     spider = ArtCoZaSpider(crawl_run_id="run-xyz")
     response = _html_response(
-        "https://www.art.co.za/artists/jane-doe/artworks/",
+        "https://www.art.co.za/jane-doe/",
         """
         <html><body>
           <article>
             <h2>Sunset Over Cape Town</h2>
-            <a href="/artists/jane-doe/artworks/sunset-over-cape-town/">details</a>
+            <a href="/jane-doe/artwork/sunset-over-cape-town/">details</a>
             <img src="/images/sunset.jpg" alt="Sunset Over Cape Town" />
-            <p>Oil on canvas.</p>
+            <figcaption>Oil on canvas.</figcaption>
           </article>
         </body></html>
         """,
     )
     response.meta["artist_name"] = "Jane Doe"
-    response.meta["artist_profile_url"] = "https://www.art.co.za/artists/jane-doe/"
+    response.meta["artist_profile_url"] = "https://www.art.co.za/jane-doe/"
 
     outputs = list(spider.parse_artwork_section(response))
     items = [obj for obj in outputs if not isinstance(obj, Request)]
@@ -96,5 +132,6 @@ def test_artwork_item_includes_artist_name_and_image_url() -> None:
     assert items
     item = items[0]
     assert item["artist_name"] == "Jane Doe"
+    assert item["source_url"] == "https://www.art.co.za/jane-doe/artwork/sunset-over-cape-town/"
     assert item["image_url"] == "https://www.art.co.za/images/sunset.jpg"
     assert item["source_domain"] == "art.co.za"
