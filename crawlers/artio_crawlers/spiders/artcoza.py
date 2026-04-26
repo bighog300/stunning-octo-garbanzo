@@ -23,6 +23,9 @@ class ArtCoZaSpider(scrapy.Spider):
 
     NON_ARTIST_ROOT_PATHS = {
         "index.php",
+        "watch-list",
+        "galleries",
+        "auctions",
         "weblinks",
         "quiz",
         "myartcoza",
@@ -45,6 +48,12 @@ class ArtCoZaSpider(scrapy.Spider):
         "featured work",
         "art in south africa",
     }
+    ARTIST_NAME_PREFIX_BLACKLIST = (
+        "art.co.za",
+        "art galleries",
+        "art auctions",
+        "watch list",
+    )
 
     ARTIST_NAME_CHROME_TOKENS = (
         "recent work",
@@ -55,8 +64,12 @@ class ArtCoZaSpider(scrapy.Spider):
     )
 
     EXCLUDED_IMAGE_TOKENS = (
+        "follow.png",
         "artcoza.jpg",
         "top-facebook.png",
+        "facebook",
+        "instagram",
+        "twitter",
         "logo",
         "icon",
         "banner",
@@ -137,10 +150,21 @@ class ArtCoZaSpider(scrapy.Spider):
             self.logger.info("Skipped invalid artist page: %s", response.url)
             return
 
+        artist_slug = self._artist_slug_from_url(response.url)
+        if not artist_slug:
+            self.skipped_invalid_artist_page += 1
+            self.logger.info("Skipped invalid artist slug: %s", response.url)
+            return
+
         artist_name = self._extract_artist_name(response)
         if not self._is_valid_artist_name(artist_name):
             self.skipped_invalid_artist_page += 1
             self.logger.info("Skipped invalid artist page name: url=%s artist_name=%s", response.url, artist_name)
+            return
+
+        if not self._has_slug_scoped_artwork_image(response, artist_slug):
+            self.skipped_invalid_artist_page += 1
+            self.logger.info("Skipped artist page without slug-scoped artwork image: %s", response.url)
             return
 
         artist_profile_url = response.url
@@ -314,6 +338,11 @@ class ArtCoZaSpider(scrapy.Spider):
                 self.skipped_placeholder_image += 1
                 self.logger.debug("Skipped placeholder image: %s", image_url)
                 continue
+            artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
+            if artist_slug and not self._is_slug_scoped_image_url(image_url, artist_slug):
+                self.skipped_placeholder_image += 1
+                self.logger.debug("Skipped non-artist image path: artist_slug=%s image=%s", artist_slug, image_url)
+                continue
 
             image_alt = node.xpath(".//img/@alt").get()
             image_title = node.xpath(".//img/@title").get()
@@ -390,6 +419,11 @@ class ArtCoZaSpider(scrapy.Spider):
             if not self._is_valid_image_url(image_url):
                 self.skipped_placeholder_image += 1
                 self.logger.debug("Skipped placeholder image: %s", image_url)
+                continue
+            artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
+            if artist_slug and not self._is_slug_scoped_image_url(image_url, artist_slug):
+                self.skipped_placeholder_image += 1
+                self.logger.debug("Skipped non-artist image path: artist_slug=%s image=%s", artist_slug, image_url)
                 continue
 
             image_alt = node.xpath("./@alt").get()
@@ -511,9 +545,35 @@ class ArtCoZaSpider(scrapy.Spider):
         lowered = cleaned.lower()
         if lowered in self.ARTIST_NAME_BLACKLIST:
             return False
+        if any(lowered.startswith(prefix) for prefix in self.ARTIST_NAME_PREFIX_BLACKLIST):
+            return False
         if "recent work" in lowered or "featured work" in lowered:
             return False
         return True
+
+    @staticmethod
+    def _artist_slug_from_url(url: str | None) -> str | None:
+        if not url:
+            return None
+        path = urlparse(url).path.strip("/")
+        if not path:
+            return None
+        return path.split("/")[0].lower()
+
+    def _is_slug_scoped_image_url(self, image_url: str | None, artist_slug: str) -> bool:
+        if not image_url or not artist_slug:
+            return False
+        image_path = urlparse(image_url).path.lower()
+        slug = artist_slug.strip("/").lower()
+        return f"/{slug}/" in image_path
+
+    def _has_slug_scoped_artwork_image(self, response: scrapy.http.Response, artist_slug: str) -> bool:
+        image_sources = response.xpath("//img/@src | //img/@data-src").getall()
+        for image_src in image_sources:
+            image_url = response.urljoin(image_src)
+            if self._is_valid_image_url(image_url) and self._is_slug_scoped_image_url(image_url, artist_slug):
+                return True
+        return False
 
     @staticmethod
     def _first_text(node, xpaths: list[str]) -> str | None:
