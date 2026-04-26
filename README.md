@@ -107,3 +107,14 @@ SUPERSET_USERNAME=admin
 SUPERSET_PASSWORD=admin
 ARTIO_DATABASE_URI=postgresql://postgres:postgres@postgres:5432/artio
 ```
+
+## Artio moderation CLI
+
+Use the local CLI to run and validate the moderation API + web UI:
+
+```bash
+python scripts/artio_moderation_cli.py start
+python scripts/artio_moderation_cli.py health
+python scripts/artio_moderation_cli.py seed-review-queue --limit 100
+python scripts/artio_moderation_cli.py open
+```
