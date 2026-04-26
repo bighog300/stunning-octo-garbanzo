@@ -18,6 +18,12 @@ Airflow orchestrates the workflow.
 cp .env.example .env
 ```
 
+Generate an Airflow Fernet key and set `AIRFLOW_FERNET_KEY` in `.env`:
+
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
 2. Start the full stack:
 
 ```bash
