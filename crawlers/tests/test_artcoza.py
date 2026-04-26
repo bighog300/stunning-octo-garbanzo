@@ -351,20 +351,27 @@ def test_front001_image_is_excluded() -> None:
     assert items[0]["image_url"] == "https://www.art.co.za/john-doe/john-doe-2019-07.jpg"
 
 
-def test_artworks_path_images_are_preferred_and_included() -> None:
+def test_slug_scoped_images_are_kept_without_artworks_path_requirement() -> None:
     spider = ArtCoZaSpider(crawl_run_id="run-xyz")
     response = _html_response(
         "https://www.art.co.za/jane-doe/",
         """
         <html><body>
           <h1>Jane Doe</h1>
-          <img src="/jane-doe/profile.jpg" alt="Jane Doe Profile" />
-          <img src="/jane-doe/artworks/sunrise.jpg" alt="Sunrise" />
+          <img src="/jane-doe/work-a.jpg" alt="Work A" />
+          <img src="/jane-doe/artworks/work-b.jpg" alt="Work B" />
+          <img src="/images/top-facebook.png" alt="social" />
         </body></html>
         """,
     )
 
     outputs = list(spider.parse_artist_profile(response))
     items = [obj for obj in outputs if not isinstance(obj, Request)]
-    assert len(items) == 1
-    assert items[0]["image_url"] == "https://www.art.co.za/jane-doe/artworks/sunrise.jpg"
+    image_urls = sorted(item["image_url"] for item in items)
+    assert image_urls == [
+        "https://www.art.co.za/jane-doe/artworks/work-b.jpg",
+        "https://www.art.co.za/jane-doe/work-a.jpg",
+    ]
+    assert spider.images_seen_per_artist["https://www.art.co.za/jane-doe/"] == 3
+    assert spider.images_kept_per_artist["https://www.art.co.za/jane-doe/"] == 2
+    assert spider.images_skipped_per_artist["https://www.art.co.za/jane-doe/"] == 1
