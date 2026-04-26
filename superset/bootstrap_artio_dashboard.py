@@ -108,28 +108,57 @@ class SupersetClient:
     def get_dataset(self, database_id: int, schema: str, table_name: str) -> dict[str, Any] | None:
         query = {
             "q": json.dumps({
-                "filters": [
-                    {"col": "schema", "opr": "eq", "value": schema},
-                    {"col": "table_name", "opr": "eq", "value": table_name},
-                ],
+                "filters": [{"col": "table_name", "opr": "eq", "value": table_name}],
                 "page": 0,
                 "page_size": 100,
             })
         }
         data = self._request("GET", "/api/v1/dataset/", params=query)
         result = data.get("result", [])
-        for dataset in result:
-            if dataset.get("schema") != schema or dataset.get("table_name") != table_name:
-                continue
 
-            dataset_database_id = dataset.get("database", {}).get("id")
-            if dataset_database_id is None:
-                dataset_database_id = dataset.get("database_id")
-            if dataset_database_id is None:
-                dataset_database_id = dataset.get("database")
+        # Debug dataset payloads to understand API response shape.
+        matching_by_table_name = [dataset for dataset in result if dataset.get("table_name") == table_name]
+        if matching_by_table_name:
+            print(f"[debug] Superset datasets for table_name={table_name}:")
+            for dataset in matching_by_table_name:
+                print(json.dumps(dataset, indent=2, sort_keys=True))
 
-            if dataset_database_id is None or dataset_database_id == database_id:
+        def dataset_database_id(dataset: dict[str, Any]) -> int | None:
+            db_value = dataset.get("database")
+            if isinstance(db_value, dict):
+                db_id = db_value.get("id")
+                return db_id if isinstance(db_id, int) else None
+            if isinstance(db_value, int):
+                return db_value
+
+            db_id = dataset.get("database_id")
+            return db_id if isinstance(db_id, int) else None
+
+        # Prefer exact table_name + schema match.
+        schema_matches = [
+            dataset for dataset in matching_by_table_name if dataset.get("schema") == schema
+        ]
+        for dataset in schema_matches:
+            db_id = dataset_database_id(dataset)
+            if db_id is None or db_id == database_id:
                 return dataset
+
+        # If schema key is absent, fall back to table_name-only match.
+        schema_missing_matches = [
+            dataset for dataset in matching_by_table_name if "schema" not in dataset
+        ]
+        for dataset in schema_missing_matches:
+            db_id = dataset_database_id(dataset)
+            if db_id is None or db_id == database_id:
+                return dataset
+
+        # If exactly one dataset has the requested table_name, use it.
+        if len(matching_by_table_name) == 1:
+            only_dataset = matching_by_table_name[0]
+            db_id = dataset_database_id(only_dataset)
+            if db_id is None or db_id == database_id:
+                return only_dataset
+
         return None
 
     def create_dataset(self, database_id: int, schema: str, table_name: str) -> int:
