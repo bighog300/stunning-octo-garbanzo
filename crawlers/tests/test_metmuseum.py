@@ -79,11 +79,18 @@ def test_start_requests_uses_sample_data_without_network_requests() -> None:
 
     results = list(spider.start_requests())
 
-    assert len(results) == 3
-    assert all(not isinstance(result, Request) for result in results)
+    assert len(results) == 1
+    assert all(isinstance(result, Request) for result in results)
+    assert results[0].url == "https://example.com/"
+    assert results[0].dont_filter is True
+    assert results[0].callback == spider.parse_sample_data
 
-    first_item = results[0]
-    second_item = results[1]
+    sample_response = _json_response("https://example.com/", {})
+    emitted_items = list(spider.parse_sample_data(sample_response))
+
+    assert len(emitted_items) == 3
+    first_item = emitted_items[0]
+    second_item = emitted_items[1]
     assert first_item["source_domain"] == "metmuseum.org"
     assert first_item["source_url"] == "https://www.metmuseum.org/art/collection/search/sample-1"
     assert second_item["source_url"] == "https://www.metmuseum.org/art/collection/search/sample-2"
@@ -101,3 +108,14 @@ def test_start_requests_uses_sample_data_without_network_requests() -> None:
     assert first_item["content_hash"]
     assert first_item["crawl_timestamp"]
     assert first_item["crawl_run_id"] == "offline-run-1"
+
+
+def test_parse_sample_data_emits_max_records() -> None:
+    spider = MetMuseumSpider(max_records=2, use_sample_data=True)
+    response = _json_response("https://example.com/", {})
+
+    items = list(spider.parse_sample_data(response))
+
+    assert len(items) == 2
+    assert items[0]["source_record_id"] == "sample-1"
+    assert items[1]["source_record_id"] == "sample-2"
