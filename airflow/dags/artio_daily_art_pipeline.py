@@ -140,8 +140,22 @@ with DAG(
         bash_command="cd /opt/artio/dbt && dbt test --profiles-dir /opt/artio/dbt",
     )
 
+    refresh_app_views = BashOperator(
+        task_id="refresh_app_views",
+        bash_command="""
+        export PGPASSWORD="${ARTIO_POSTGRES_PASSWORD}" && \
+        psql \
+          -v ON_ERROR_STOP=1 \
+          -h "${ARTIO_POSTGRES_HOST}" \
+          -p "${ARTIO_POSTGRES_PORT}" \
+          -U "${ARTIO_POSTGRES_USER}" \
+          -d "${ARTIO_POSTGRES_DB}" \
+          -f /opt/artio/infra/postgres/views/create_app_views.sql
+        """,
+    )
+
     refresh_superset = EmptyOperator(task_id="refresh_superset")
     notify_success = EmptyOperator(task_id="notify_success")
     end = EmptyOperator(task_id="end")
 
-    start >> create_run >> run_spider >> validate >> dbt_deps >> dbt_seed >> dbt_run >> dbt_test >> refresh_superset >> notify_success >> end
+    start >> create_run >> run_spider >> validate >> dbt_deps >> dbt_seed >> dbt_run >> dbt_test >> refresh_app_views >> refresh_superset >> notify_success >> end
