@@ -1,4 +1,5 @@
 from pathlib import Path
+import hashlib
 
 from artio_crawlers.spiders.artcoza import ArtCoZaSpider
 from scrapy.http import Request, TextResponse
@@ -375,3 +376,35 @@ def test_slug_scoped_images_are_kept_without_artworks_path_requirement() -> None
     assert spider.images_seen_per_artist["https://www.art.co.za/jane-doe/"] == 3
     assert spider.images_kept_per_artist["https://www.art.co.za/jane-doe/"] == 2
     assert spider.images_skipped_per_artist["https://www.art.co.za/jane-doe/"] == 1
+
+
+def test_same_artist_different_images_have_unique_identity_fields() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Jane Doe</h1>
+          <img src="/jane-doe/work-a.jpg" alt="Work A" />
+          <img src="/jane-doe/work-b.jpg" alt="Work A" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+
+    assert len(items) == 2
+    assert items[0]["source_record_id"] != items[1]["source_record_id"]
+    assert items[0]["content_hash"] != items[1]["content_hash"]
+    assert items[0]["source_record_id"] == "art.co.za:jane-doe:work-a.jpg"
+    assert items[1]["source_record_id"] == "art.co.za:jane-doe:work-b.jpg"
+
+
+def test_source_record_id_uses_sha1_when_image_filename_missing() -> None:
+    spider = ArtCoZaSpider()
+    image_url = "https://www.art.co.za/"
+
+    source_record_id = spider._build_source_record_id("jane-doe", image_url)
+
+    assert source_record_id == f"art.co.za:jane-doe:{hashlib.sha1(image_url.encode('utf-8')).hexdigest()}"
