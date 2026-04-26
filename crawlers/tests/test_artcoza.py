@@ -292,3 +292,79 @@ def test_slug_scoped_image_required_for_profile_and_artwork_items() -> None:
         section_items[0]["image_url"]
         == "https://www.art.co.za/ruhanjansevanvuuren/ruhan_janse_van_vuuren_2024_52.jpg"
     )
+
+
+def test_studio_image_is_excluded() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Jane Doe</h1>
+          <img src="/jane-doe/studio.jpg" alt="Artist Photo" />
+          <img src="/jane-doe/work-2024-01.jpg" alt="Blue Study" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://www.art.co.za/jane-doe/work-2024-01.jpg"
+
+
+def test_cv_image_is_excluded() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/diane-victor/",
+        """
+        <html><body>
+          <h1>Diane Victor</h1>
+          <img src="/diane-victor/Diane_Victor_cv.jpg" alt="Diane Victor Cv" />
+          <img src="/diane-victor/diane-victor-2023-18.jpg" alt="Smoke Figure" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://www.art.co.za/diane-victor/diane-victor-2023-18.jpg"
+
+
+def test_front001_image_is_excluded() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/john-doe/",
+        """
+        <html><body>
+          <h1>John Doe</h1>
+          <img src="/john-doe/front001.jpg" alt="John Doe Profile" />
+          <img src="/john-doe/john-doe-2019-07.jpg" alt="Red Horizon" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://www.art.co.za/john-doe/john-doe-2019-07.jpg"
+
+
+def test_artworks_path_images_are_preferred_and_included() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Jane Doe</h1>
+          <img src="/jane-doe/profile.jpg" alt="Jane Doe Profile" />
+          <img src="/jane-doe/artworks/sunrise.jpg" alt="Sunrise" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://www.art.co.za/jane-doe/artworks/sunrise.jpg"
