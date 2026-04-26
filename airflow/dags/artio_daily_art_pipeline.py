@@ -93,6 +93,12 @@ with DAG(
         python_callable=validate_raw_ingestion,
     )
 
+
+    dbt_deps = BashOperator(
+        task_id="dbt_deps",
+        bash_command="cd /opt/artio/dbt && dbt deps --profiles-dir /opt/artio/dbt",
+    )
+
     dbt_seed = BashOperator(
         task_id="dbt_seed",
         bash_command="cd /opt/artio/dbt && dbt seed --profiles-dir /opt/artio/dbt",
@@ -112,4 +118,4 @@ with DAG(
     notify_success = EmptyOperator(task_id="notify_success")
     end = EmptyOperator(task_id="end")
 
-    start >> create_run >> run_spider >> validate >> dbt_seed >> dbt_run >> dbt_test >> refresh_superset >> notify_success >> end
+    start >> create_run >> run_spider >> validate >> dbt_deps >> dbt_seed >> dbt_run >> dbt_test >> refresh_superset >> notify_success >> end
