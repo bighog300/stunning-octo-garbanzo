@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from pathlib import PurePosixPath
 import re
 from urllib.parse import urlparse
@@ -431,7 +432,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["source_name"] = "Art.co.za"
             item["source_domain"] = "art.co.za"
             item["source_url"] = source_url
-            item["source_record_id"] = content_hash(source_url, image_url or title)[:24]
+            item["source_record_id"] = self._build_source_record_id(artist_slug, image_url)
             item["artist_name"] = artist_name
             item["artwork_title"] = title
             item["artwork_date_text"] = self._first_text(node, [".//*[contains(@class,'date')]/text()"])
@@ -446,7 +447,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["thumbnail_url"] = image_url
             item["description"] = caption
             item["raw_payload"] = raw_payload
-            item["content_hash"] = content_hash(source_url, image_url or title)
+            item["content_hash"] = content_hash("art.co.za", artist_slug, artist_name, image_url, title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             self.emitted_records += 1
@@ -527,7 +528,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["source_name"] = "Art.co.za"
             item["source_domain"] = "art.co.za"
             item["source_url"] = source_url
-            item["source_record_id"] = content_hash(source_url, image_url)[:24]
+            item["source_record_id"] = self._build_source_record_id(artist_slug, image_url)
             item["artist_name"] = artist_name
             item["artwork_title"] = title
             item["artwork_date_text"] = None
@@ -542,7 +543,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["thumbnail_url"] = image_url
             item["description"] = caption
             item["raw_payload"] = raw_payload
-            item["content_hash"] = content_hash(source_url, image_url)
+            item["content_hash"] = content_hash("art.co.za", artist_slug, artist_name, image_url, title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             self.emitted_records += 1
@@ -622,6 +623,13 @@ class ArtCoZaSpider(scrapy.Spider):
         if not path:
             return None
         return path.split("/")[0].lower()
+
+    @staticmethod
+    def _build_source_record_id(artist_slug: str | None, image_url: str) -> str:
+        normalized_slug = (artist_slug or "unknown-artist").strip().lower()
+        image_filename = PurePosixPath(urlparse(image_url).path).name
+        image_identifier = image_filename or hashlib.sha1(image_url.encode("utf-8")).hexdigest()
+        return f"art.co.za:{normalized_slug}:{image_identifier}"
 
     def _is_slug_scoped_image_url(self, image_url: str | None, artist_slug: str) -> bool:
         if not image_url or not artist_slug:
