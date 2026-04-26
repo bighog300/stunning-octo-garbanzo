@@ -43,6 +43,11 @@ class ArtCoZaSpider(scrapy.Spider):
 
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
+        self.logger.info("Found %d artist links on %s", len(artist_links), response.url)
+        self.logger.info(
+            "First 5 artist URLs: %s",
+            [response.urljoin(link) for link in artist_links[:5]],
+        )
         for href in artist_links:
             if self.artists_seen >= self.max_artists:
                 break
@@ -62,9 +67,19 @@ class ArtCoZaSpider(scrapy.Spider):
     def parse_artist_profile(self, response: scrapy.http.Response):
         artist_name = self._extract_artist_name(response)
         artist_profile_url = response.url
+        found_profile_records = 0
+
+        for item in self._extract_profile_artwork_items(response, artist_name, artist_profile_url):
+            if self.records_seen >= self.max_records:
+                break
+            self.records_seen += 1
+            found_profile_records += 1
+            yield item
 
         section_links = self._extract_artwork_section_links(response)
         for href in section_links:
+            if self.records_seen >= self.max_records:
+                break
             section_url = response.urljoin(href)
             if section_url in self._visited_artwork_pages:
                 continue
@@ -77,6 +92,9 @@ class ArtCoZaSpider(scrapy.Spider):
                     "artist_profile_url": artist_profile_url,
                 },
             )
+
+        if found_profile_records == 0:
+            self.logger.info("No artwork records found on profile page: %s", response.url)
 
     def parse_artwork_section(self, response: scrapy.http.Response):
         artist_name = response.meta.get("artist_name")
@@ -111,15 +129,41 @@ class ArtCoZaSpider(scrapy.Spider):
             yield response.follow(detail_url, callback=self.parse_artwork_section, meta=response.meta)
 
     def _extract_artist_profile_links(self, response: scrapy.http.Response) -> list[str]:
-        candidates = response.xpath("//a[contains(@href, '/artists/')]/@href").getall()
+        candidates = response.xpath("//a[@href]/@href").getall()
+        excluded_root_paths = {
+            "artists",
+            "exhibitions",
+            "training",
+            "auctions",
+            "galleries",
+            "websites",
+            "art-quiz",
+            "art-videos",
+            "watch-list",
+            "blog",
+            "my",
+        }
         out: list[str] = []
         for href in candidates:
             absolute = response.urljoin(href)
             parsed = urlparse(absolute)
+            if parsed.netloc not in {"art.co.za", "www.art.co.za"}:
+                continue
             path = parsed.path.rstrip("/")
             if not path or path == "/artists":
                 continue
-            if path.count("/") < 2:
+            segments = [segment for segment in path.split("/") if segment]
+            if not segments:
+                continue
+            if segments[0] == "artists":
+                if len(segments) == 1:
+                    continue
+                if len(segments) == 2 and len(segments[1]) == 1:
+                    continue
+            elif len(segments) == 1:
+                if segments[0] in excluded_root_paths:
+                    continue
+            else:
                 continue
             out.append(href)
         return list(dict.fromkeys(out))
@@ -207,6 +251,61 @@ class ArtCoZaSpider(scrapy.Spider):
             item["description"] = self._first_text(node, [".//p/text()", ".//*[contains(@class,'description')]/text()"])
             item["raw_payload"] = raw_payload
             item["content_hash"] = content_hash(source_url, image_url or title)
+            item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
+            item["crawl_run_id"] = self.crawl_run_id
+            yield item
+
+    def _extract_profile_artwork_items(
+        self,
+        response: scrapy.http.Response,
+        artist_name: str | None,
+        artist_profile_url: str | None,
+    ):
+        image_nodes = response.xpath(
+            "//img[contains(translate(@alt, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
+            " | //img[contains(translate(@title, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
+            " | //a[contains(@href, '/uploads/')]/img"
+        )
+        for node in image_nodes:
+            image_url = node.xpath("./@src").get() or node.xpath("./@data-src").get()
+            if not image_url:
+                continue
+            image_url = response.urljoin(image_url)
+            title = self._first_text(node, ["./@alt", "./@title"]) or "Artwork"
+            source_url = response.url
+
+            dedupe_key = f"{source_url}|{image_url}"
+            if dedupe_key in self._emitted_record_keys:
+                continue
+            self._emitted_record_keys.add(dedupe_key)
+
+            raw_payload = {
+                "artist_profile_url": artist_profile_url,
+                "source_page": response.url,
+                "title": title,
+                "image_url": image_url,
+            }
+
+            item = ArtworkItem()
+            item["source_name"] = "Art.co.za"
+            item["source_domain"] = "art.co.za"
+            item["source_url"] = source_url
+            item["source_record_id"] = content_hash(source_url, image_url)[:24]
+            item["artist_name"] = artist_name
+            item["artwork_title"] = title
+            item["artwork_date_text"] = None
+            item["medium_text"] = None
+            item["dimensions_text"] = None
+            item["price_text"] = None
+            item["currency_text"] = None
+            item["gallery_name"] = None
+            item["institution_name"] = None
+            item["department_name"] = None
+            item["image_url"] = image_url
+            item["thumbnail_url"] = image_url
+            item["description"] = None
+            item["raw_payload"] = raw_payload
+            item["content_hash"] = content_hash(source_url, image_url)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             yield item
