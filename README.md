@@ -36,6 +36,12 @@ docker compose up -d
 docker compose exec scrapy scrapy crawl metmuseum_artworks -a max_records=25 -a max_pages=3
 ```
 
+Offline/local fallback validation (no external network dependency):
+
+```bash
+docker compose exec scrapy scrapy crawl metmuseum_artworks -a max_records=25 -a use_sample_data=true
+```
+
 4. Run dbt (deps, seed, run, test):
 
 ```bash

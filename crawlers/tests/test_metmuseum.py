@@ -72,3 +72,32 @@ def test_parse_artwork_maps_api_payload() -> None:
     assert item["content_hash"]
     assert item["crawl_timestamp"]
     assert item["crawl_run_id"] == "run-1"
+
+
+def test_start_requests_uses_sample_data_without_network_requests() -> None:
+    spider = MetMuseumSpider(max_records=3, crawl_run_id="offline-run-1", use_sample_data=True)
+
+    results = list(spider.start_requests())
+
+    assert len(results) == 3
+    assert all(not isinstance(result, Request) for result in results)
+
+    first_item = results[0]
+    second_item = results[1]
+    assert first_item["source_domain"] == "metmuseum.org"
+    assert first_item["source_url"] == "https://www.metmuseum.org/art/collection/search/sample-1"
+    assert second_item["source_url"] == "https://www.metmuseum.org/art/collection/search/sample-2"
+    assert first_item["source_record_id"] == "sample-1"
+    assert second_item["source_record_id"] == "sample-2"
+    assert first_item["artist_name"]
+    assert first_item["artwork_title"]
+    assert first_item["artwork_date_text"]
+    assert first_item["medium_text"]
+    assert first_item["dimensions_text"]
+    assert first_item["image_url"].endswith("/sample-1.jpg")
+    assert first_item["thumbnail_url"].endswith("/sample-1.jpg")
+    assert first_item["description"]
+    assert first_item["raw_payload"] == {"sample": True, "sample_id": "sample-1"}
+    assert first_item["content_hash"]
+    assert first_item["crawl_timestamp"]
+    assert first_item["crawl_run_id"] == "offline-run-1"
