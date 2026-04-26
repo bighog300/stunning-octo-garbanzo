@@ -1,0 +1,26 @@
+name: artio_dbt
+version: "1.0.0"
+config-version: 2
+
+profile: artio_dbt
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+
+models:
+  artio_dbt:
+    staging:
+      +schema: analytics
+      +materialized: view
+    intermediate:
+      +schema: analytics
+      +materialized: table
+    marts:
+      +schema: analytics
+      +materialized: table
+
+seeds:
+  artio_dbt:
+    +schema: analytics

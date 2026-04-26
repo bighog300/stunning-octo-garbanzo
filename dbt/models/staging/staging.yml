@@ -1,0 +1,15 @@
+version: 2
+
+models:
+  - name: stg_artworks
+    columns:
+      - name: raw_artwork_id
+        tests:
+          - not_null
+          - unique
+      - name: source_url
+        tests:
+          - not_null
+      - name: source_domain
+        tests:
+          - not_null

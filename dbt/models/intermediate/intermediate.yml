@@ -1,0 +1,8 @@
+version: 2
+
+models:
+  - name: int_artwork_normalized
+    columns:
+      - name: raw_artwork_id
+        tests:
+          - not_null

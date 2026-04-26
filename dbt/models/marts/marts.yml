@@ -1,0 +1,20 @@
+version: 2
+
+models:
+  - name: mart_artworks
+    columns:
+      - name: artwork_id
+        tests:
+          - not_null
+          - unique
+      - name: source_url
+        tests:
+          - not_null
+      - name: source_domain
+        tests:
+          - not_null
+      - name: quality_score
+        tests:
+          - not_null
+
+  - name: mart_crawl_quality

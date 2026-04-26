@@ -1,0 +1,12 @@
+artio_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('ARTIO_POSTGRES_HOST', 'postgres') }}"
+      port: "{{ env_var('ARTIO_POSTGRES_PORT', '5432') | int }}"
+      user: "{{ env_var('ARTIO_POSTGRES_USER', 'artio') }}"
+      pass: "{{ env_var('ARTIO_POSTGRES_PASSWORD', 'artio') }}"
+      dbname: "{{ env_var('ARTIO_POSTGRES_DB', 'artio') }}"
+      schema: analytics
+      threads: 4
