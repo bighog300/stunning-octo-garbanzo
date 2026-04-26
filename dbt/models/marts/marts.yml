@@ -18,3 +18,24 @@ models:
           - not_null
 
   - name: mart_crawl_quality
+
+  - name: mart_events
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+          - unique
+      - name: source_url
+        tests:
+          - not_null
+
+  - name: mart_artist_activity
+    columns:
+      - name: artist_activity_id
+        tests:
+          - not_null
+          - unique
+      - name: event_id
+        tests:
+          - not_null
+

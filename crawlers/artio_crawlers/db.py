@@ -87,3 +87,125 @@ def upsert_artwork(conn, item: dict) -> None:
             {**item, "raw_payload": Json(item.get("raw_payload") or {})},
         )
     conn.commit()
+
+
+def upsert_event(conn, item: dict) -> str:
+    has_source_record_id = bool(item.get("source_record_id"))
+    conflict_target = (
+        "(source_domain, source_record_id) WHERE source_record_id IS NOT NULL"
+        if has_source_record_id
+        else "(source_domain, source_url) WHERE source_record_id IS NULL"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            f'''
+            INSERT INTO raw.events (
+                crawl_run_id,
+                source_name,
+                source_domain,
+                source_url,
+                source_record_id,
+                event_type,
+                event_title,
+                venue_name,
+                venue_address,
+                city,
+                country,
+                start_date,
+                end_date,
+                opening_datetime,
+                description,
+                image_url,
+                raw_payload,
+                content_hash,
+                crawl_timestamp
+            )
+            VALUES (
+                %(crawl_run_id)s,
+                %(source_name)s,
+                %(source_domain)s,
+                %(source_url)s,
+                %(source_record_id)s,
+                %(event_type)s,
+                %(event_title)s,
+                %(venue_name)s,
+                %(venue_address)s,
+                %(city)s,
+                %(country)s,
+                %(start_date)s,
+                %(end_date)s,
+                %(opening_datetime)s,
+                %(description)s,
+                %(image_url)s,
+                %(raw_payload)s,
+                %(content_hash)s,
+                %(crawl_timestamp)s
+            )
+            ON CONFLICT {conflict_target}
+            DO UPDATE SET
+                source_name = EXCLUDED.source_name,
+                event_type = EXCLUDED.event_type,
+                event_title = EXCLUDED.event_title,
+                venue_name = EXCLUDED.venue_name,
+                venue_address = EXCLUDED.venue_address,
+                city = EXCLUDED.city,
+                country = EXCLUDED.country,
+                start_date = EXCLUDED.start_date,
+                end_date = EXCLUDED.end_date,
+                opening_datetime = EXCLUDED.opening_datetime,
+                description = EXCLUDED.description,
+                image_url = EXCLUDED.image_url,
+                raw_payload = EXCLUDED.raw_payload,
+                content_hash = EXCLUDED.content_hash,
+                crawl_timestamp = EXCLUDED.crawl_timestamp,
+                updated_at = now()
+            RETURNING id
+            ''',
+            {**item, "raw_payload": Json(item.get("raw_payload") or {})},
+        )
+        event_id = str(cur.fetchone()[0])
+    conn.commit()
+    return event_id
+
+
+def delete_event_children(conn, event_id: str) -> None:
+    with conn.cursor() as cur:
+        cur.execute("DELETE FROM raw.event_artists WHERE event_id = %s", (event_id,))
+        cur.execute("DELETE FROM raw.event_images WHERE event_id = %s", (event_id,))
+    conn.commit()
+
+
+def insert_event_artist(conn, item: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO raw.event_artists (
+                event_id,
+                artist_name,
+                artist_name_normalized,
+                artist_profile_url,
+                match_type
+            )
+            VALUES (%(event_id)s, %(artist_name)s, %(artist_name_normalized)s, %(artist_profile_url)s, %(match_type)s)
+            """,
+            item,
+        )
+    conn.commit()
+
+
+def insert_event_image(conn, item: dict) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO raw.event_images (
+                event_id,
+                image_url,
+                image_caption,
+                image_type,
+                content_hash
+            )
+            VALUES (%(event_id)s, %(image_url)s, %(image_caption)s, %(image_type)s, %(content_hash)s)
+            """,
+            item,
+        )
+    conn.commit()

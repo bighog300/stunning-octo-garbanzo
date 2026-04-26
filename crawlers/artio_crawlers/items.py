@@ -27,3 +27,47 @@ class ArtworkItem(scrapy.Item):
     content_hash = scrapy.Field()
     crawl_timestamp = scrapy.Field()
     crawl_run_id = scrapy.Field()
+
+
+class EventItem(scrapy.Item):
+    crawl_run_id = scrapy.Field()
+    source_name = scrapy.Field()
+    source_domain = scrapy.Field()
+    source_url = scrapy.Field()
+    source_record_id = scrapy.Field()
+
+    event_type = scrapy.Field()
+    event_title = scrapy.Field()
+    venue_name = scrapy.Field()
+    venue_address = scrapy.Field()
+    city = scrapy.Field()
+    country = scrapy.Field()
+    start_date = scrapy.Field()
+    end_date = scrapy.Field()
+    opening_datetime = scrapy.Field()
+    description = scrapy.Field()
+    image_url = scrapy.Field()
+
+    raw_payload = scrapy.Field()
+    content_hash = scrapy.Field()
+    crawl_timestamp = scrapy.Field()
+
+
+class EventArtistItem(scrapy.Item):
+    event_source_record_id = scrapy.Field()
+    event_source_url = scrapy.Field()
+    event_id = scrapy.Field()
+    artist_name = scrapy.Field()
+    artist_name_normalized = scrapy.Field()
+    artist_profile_url = scrapy.Field()
+    match_type = scrapy.Field()
+
+
+class EventImageItem(scrapy.Item):
+    event_source_record_id = scrapy.Field()
+    event_source_url = scrapy.Field()
+    event_id = scrapy.Field()
+    image_url = scrapy.Field()
+    image_caption = scrapy.Field()
+    image_type = scrapy.Field()
+    content_hash = scrapy.Field()
