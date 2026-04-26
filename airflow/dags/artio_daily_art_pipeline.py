@@ -106,8 +106,10 @@ with DAG(
         task_id="run_scrapy_spider",
         bash_command="""
         cd /opt/artio/crawlers && \
-        scrapy crawl {{ dag_run.conf.get('spider_name', 'metmuseum_artworks') }} \
+        scrapy crawl {{ dag_run.conf.get('spider', 'metmuseum_artworks') }} \
           -a crawl_run_id={{ ti.xcom_pull(task_ids='create_crawl_run') }} \
+          -a max_artists={{ dag_run.conf.get('max_artists', 25) }} \
+          -a full_crawl={{ dag_run.conf.get('full_crawl', false) }} \
           -a max_records={{ dag_run.conf.get('max_records', 25) }} \
           -a max_pages={{ dag_run.conf.get('max_pages', 3) }} \
           -a use_sample_data={{ dag_run.conf.get('use_sample_data', false) }}
