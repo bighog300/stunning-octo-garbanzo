@@ -163,6 +163,42 @@ services:
     networks:
       - artio_net
 
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: artio_api
+    restart: unless-stopped
+    environment:
+      ARTIO_POSTGRES_HOST: postgres
+      ARTIO_POSTGRES_PORT: 5432
+      ARTIO_POSTGRES_DB: artio
+      ARTIO_POSTGRES_USER: artio
+      ARTIO_POSTGRES_PASSWORD: artio
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - artio_net
+
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    container_name: artio_web
+    restart: unless-stopped
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "5173:5173"
+    depends_on:
+      api:
+        condition: service_started
+    networks:
+      - artio_net
+
 volumes:
   postgres_data:
   superset_home:
