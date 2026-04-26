@@ -388,7 +388,7 @@ class ArtCoZaSpider(scrapy.Spider):
             caption = self._first_text(node, [".//figcaption//text()", ".//*[contains(@class,'caption')]//text()"])
 
             source_href = node.xpath(".//a[1]/@href").get()
-            source_url = response.urljoin(source_href) if source_href else (artist_profile_url or response.url)
+            source_url = artist_profile_url or response.url
             if not self._is_valid_artcoza_http_url(source_url):
                 self.skipped_invalid_source_url += 1
                 self._track_artist_image_skipped(artist_key)
@@ -422,6 +422,7 @@ class ArtCoZaSpider(scrapy.Spider):
 
             raw_payload = {
                 "artist_profile_url": artist_profile_url,
+                "source_href": source_href,
                 "image_src": image_src,
                 "image_alt": image_alt,
                 "image_title": image_title,
