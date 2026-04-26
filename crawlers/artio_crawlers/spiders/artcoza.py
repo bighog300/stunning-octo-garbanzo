@@ -132,6 +132,9 @@ class ArtCoZaSpider(scrapy.Spider):
         self.skipped_placeholder_image = 0
         self.skipped_invalid_artist_page = 0
         self.emitted_records = 0
+        self.images_seen_per_artist: dict[str, int] = {}
+        self.images_kept_per_artist: dict[str, int] = {}
+        self.images_skipped_per_artist: dict[str, int] = {}
 
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
@@ -209,6 +212,13 @@ class ArtCoZaSpider(scrapy.Spider):
             )
 
         self.records_per_artist[artist_profile_url] = self.records_per_artist.get(artist_profile_url, 0) + per_artist_count
+        self._log_artist_image_stats_delta(
+            artist_profile_url,
+            context="artist_profile",
+            seen_before=0,
+            kept_before=0,
+            skipped_before=0,
+        )
         self.logger.info(
             "Artist processed: url=%s name=%s records=%d",
             artist_profile_url,
@@ -220,6 +230,9 @@ class ArtCoZaSpider(scrapy.Spider):
         artist_name = response.meta.get("artist_name")
         artist_profile_url = response.meta.get("artist_profile_url")
         artist_key = artist_profile_url or response.url
+        seen_before = self.images_seen_per_artist.get(artist_key, 0)
+        kept_before = self.images_kept_per_artist.get(artist_key, 0)
+        skipped_before = self.images_skipped_per_artist.get(artist_key, 0)
 
         for item in self._extract_artwork_items(response, artist_name, artist_profile_url):
             if self._record_limit_reached():
@@ -227,6 +240,13 @@ class ArtCoZaSpider(scrapy.Spider):
             self.records_seen += 1
             self.records_per_artist[artist_key] = self.records_per_artist.get(artist_key, 0) + 1
             yield item
+        self._log_artist_image_stats_delta(
+            artist_key,
+            context="artwork_section",
+            seen_before=seen_before,
+            kept_before=kept_before,
+            skipped_before=skipped_before,
+        )
 
         if self._record_limit_reached():
             return
@@ -344,23 +364,22 @@ class ArtCoZaSpider(scrapy.Spider):
     ):
         nodes = response.xpath("//article | //li | //figure | //div[contains(@class, 'art')]")
         artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
-        prefer_artworks_path = bool(artist_slug) and self._response_has_preferred_artwork_images(response, artist_slug)
+        artist_key = artist_profile_url or response.url
         for node in nodes:
             image_src = node.xpath(".//img/@src").get() or node.xpath(".//img/@data-src").get()
             if not image_src:
                 continue
+            self._track_artist_image_seen(artist_key)
             image_url = response.urljoin(image_src)
             if not self._is_valid_image_url(image_url):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped placeholder image: %s", image_url)
                 continue
             if artist_slug and not self._is_slug_scoped_image_url(image_url, artist_slug):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped non-artist image path: artist_slug=%s image=%s", artist_slug, image_url)
-                continue
-            if artist_slug and prefer_artworks_path and not self._is_preferred_artwork_path(image_url, artist_slug):
-                self.skipped_placeholder_image += 1
-                self.logger.debug("Skipped non-artworks image when artworks paths exist: %s", image_url)
                 continue
 
             image_alt = node.xpath(".//img/@alt").get()
@@ -371,26 +390,32 @@ class ArtCoZaSpider(scrapy.Spider):
             source_url = response.urljoin(source_href) if source_href else (artist_profile_url or response.url)
             if not self._is_valid_artcoza_http_url(source_url):
                 self.skipped_invalid_source_url += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped invalid source_url: %s", source_url)
                 continue
 
             if not self._is_valid_artist_name(artist_name):
                 self.skipped_invalid_artist_page += 1
+                self._track_artist_image_skipped(artist_key)
                 continue
 
             title = self._infer_title(image_url, image_alt, image_title, caption, node)
             if not title:
+                self._track_artist_image_skipped(artist_key)
                 continue
             title = title.strip()
             if not title:
+                self._track_artist_image_skipped(artist_key)
                 continue
             if self._is_non_artwork_image(image_url, title):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped non-artwork image/title: image=%s title=%s", image_url, title)
                 continue
 
             dedupe_key = f"{source_url}|{image_url}|{title}"
             if dedupe_key in self._emitted_record_keys:
+                self._track_artist_image_skipped(artist_key)
                 continue
             self._emitted_record_keys.add(dedupe_key)
 
@@ -425,6 +450,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             self.emitted_records += 1
+            self._track_artist_image_kept(artist_key)
             yield item
 
     def _extract_profile_artwork_items(
@@ -435,23 +461,22 @@ class ArtCoZaSpider(scrapy.Spider):
     ):
         image_nodes = response.xpath("//img")
         artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
-        prefer_artworks_path = bool(artist_slug) and self._response_has_preferred_artwork_images(response, artist_slug)
+        artist_key = artist_profile_url or response.url
         for node in image_nodes:
             image_src = node.xpath("./@src").get() or node.xpath("./@data-src").get()
             if not image_src:
                 continue
+            self._track_artist_image_seen(artist_key)
             image_url = response.urljoin(image_src)
             if not self._is_valid_image_url(image_url):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped placeholder image: %s", image_url)
                 continue
             if artist_slug and not self._is_slug_scoped_image_url(image_url, artist_slug):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped non-artist image path: artist_slug=%s image=%s", artist_slug, image_url)
-                continue
-            if artist_slug and prefer_artworks_path and not self._is_preferred_artwork_path(image_url, artist_slug):
-                self.skipped_placeholder_image += 1
-                self.logger.debug("Skipped non-artworks image when artworks paths exist: %s", image_url)
                 continue
 
             image_alt = node.xpath("./@alt").get()
@@ -465,23 +490,28 @@ class ArtCoZaSpider(scrapy.Spider):
             )
             title = self._infer_title(image_url, image_alt, image_title, caption)
             if not title:
+                self._track_artist_image_skipped(artist_key)
                 continue
             if self._is_non_artwork_image(image_url, title):
                 self.skipped_placeholder_image += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped non-artwork image/title: image=%s title=%s", image_url, title)
                 continue
 
             source_url = artist_profile_url or response.url
             if not self._is_valid_artcoza_http_url(source_url):
                 self.skipped_invalid_source_url += 1
+                self._track_artist_image_skipped(artist_key)
                 self.logger.debug("Skipped invalid source_url: %s", source_url)
                 continue
 
             if not self._is_valid_artist_name(artist_name):
                 self.skipped_invalid_artist_page += 1
+                self._track_artist_image_skipped(artist_key)
                 continue
             dedupe_key = f"{source_url}|{image_url}|{title}"
             if dedupe_key in self._emitted_record_keys:
+                self._track_artist_image_skipped(artist_key)
                 continue
             self._emitted_record_keys.add(dedupe_key)
 
@@ -516,6 +546,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             self.emitted_records += 1
+            self._track_artist_image_kept(artist_key)
             yield item
 
     def closed(self, reason: str):
@@ -630,26 +661,37 @@ class ArtCoZaSpider(scrapy.Spider):
         filename = PurePosixPath(path).name
         return self._contains_non_artwork_token(filename) or self._contains_non_artwork_token(inferred_title)
 
-    @staticmethod
-    def _is_preferred_artwork_path(image_url: str | None, artist_slug: str) -> bool:
-        if not image_url or not artist_slug:
-            return False
-        image_path = urlparse(image_url).path.lower()
-        slug = artist_slug.strip("/").lower()
-        return f"/{slug}/artworks/" in image_path
+    def _track_artist_image_seen(self, artist_key: str) -> None:
+        self.images_seen_per_artist[artist_key] = self.images_seen_per_artist.get(artist_key, 0) + 1
 
-    def _response_has_preferred_artwork_images(self, response: scrapy.http.Response, artist_slug: str) -> bool:
-        image_sources = response.xpath("//img/@src | //img/@data-src").getall()
-        for image_src in image_sources:
-            image_url = response.urljoin(image_src)
-            if (
-                self._is_valid_image_url(image_url)
-                and self._is_slug_scoped_image_url(image_url, artist_slug)
-                and self._is_preferred_artwork_path(image_url, artist_slug)
-                and not self._is_non_artwork_image(image_url, None)
-            ):
-                return True
-        return False
+    def _track_artist_image_kept(self, artist_key: str) -> None:
+        self.images_kept_per_artist[artist_key] = self.images_kept_per_artist.get(artist_key, 0) + 1
+
+    def _track_artist_image_skipped(self, artist_key: str) -> None:
+        self.images_skipped_per_artist[artist_key] = self.images_skipped_per_artist.get(artist_key, 0) + 1
+
+    def _log_artist_image_stats_delta(
+        self,
+        artist_key: str,
+        context: str,
+        seen_before: int,
+        kept_before: int,
+        skipped_before: int,
+    ) -> None:
+        seen_after = self.images_seen_per_artist.get(artist_key, 0)
+        kept_after = self.images_kept_per_artist.get(artist_key, 0)
+        skipped_after = self.images_skipped_per_artist.get(artist_key, 0)
+        self.logger.info(
+            "Image filtering stats: context=%s artist=%s seen=%d kept=%d skipped=%d delta_seen=%d delta_kept=%d delta_skipped=%d",
+            context,
+            artist_key,
+            seen_after,
+            kept_after,
+            skipped_after,
+            seen_after - seen_before,
+            kept_after - kept_before,
+            skipped_after - skipped_before,
+        )
 
     @staticmethod
     def _first_text(node, xpaths: list[str]) -> str | None:
