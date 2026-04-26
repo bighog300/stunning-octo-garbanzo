@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 import json
+
 import scrapy
 
 from artio_crawlers.items import ArtworkItem
@@ -8,89 +9,83 @@ from artio_crawlers.utils.hashing import content_hash
 
 class MetMuseumSpider(scrapy.Spider):
     name = "metmuseum_artworks"
-    allowed_domains = ["metmuseum.org"]
-    start_urls = ["https://www.metmuseum.org/art/collection/search"]
+    allowed_domains = ["collectionapi.metmuseum.org", "metmuseum.org"]
+    start_urls = [
+        "https://collectionapi.metmuseum.org/public/collection/v1/search?hasImages=true&q=painting"
+    ]
 
     custom_settings = {
         "ROBOTSTXT_OBEY": True,
     }
 
-    def __init__(self, max_records=25, max_pages=3, crawl_run_id=None, dry_run=False, *args, **kwargs):
+    def __init__(self, max_records=25, max_pages=None, crawl_run_id=None, dry_run=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.max_records = int(max_records)
-        self.max_pages = int(max_pages)
+        self.max_pages = max_pages
         self.crawl_run_id = crawl_run_id
         self.dry_run = str(dry_run).lower() in {"true", "1", "yes"}
         self.records_seen = 0
-        self.pages_seen = 0
 
     def parse(self, response):
-        self.pages_seen += 1
+        payload = json.loads(response.text)
+        object_ids = payload.get("objectIDs") or []
 
-        detail_links = response.css("a[href*='/art/collection/search/']::attr(href)").getall()
-        seen = set()
-
-        for href in detail_links:
+        for object_id in object_ids:
             if self.records_seen >= self.max_records:
-                return
-
-            url = response.urljoin(href)
-            if url in seen:
-                continue
-            seen.add(url)
+                break
 
             self.records_seen += 1
-            yield scrapy.Request(url, callback=self.parse_artwork)
-
-        if self.pages_seen < self.max_pages and self.records_seen < self.max_records:
-            next_page = response.css("a[rel='next']::attr(href), a.next::attr(href)").get()
-            if next_page:
-                yield response.follow(next_page, callback=self.parse)
+            yield scrapy.Request(
+                url=(
+                    "https://collectionapi.metmuseum.org/public/collection/v1/objects/"
+                    f"{object_id}"
+                ),
+                callback=self.parse_artwork,
+            )
 
     def parse_artwork(self, response):
-        title = response.css("h1::text").get()
-        artist = response.css("[data-testid='artist-name']::text, .artist-name::text").get()
+        raw_payload = json.loads(response.text)
 
-        # Fallbacks for generic page text.
-        if title:
-            title = title.strip()
-        if artist:
-            artist = artist.strip()
+        object_id = raw_payload.get("objectID")
+        object_api_url = (
+            "https://collectionapi.metmuseum.org/public/collection/v1/objects/"
+            f"{object_id}"
+        )
 
-        meta_description = response.css("meta[name='description']::attr(content)").get()
-        canonical = response.css("link[rel='canonical']::attr(href)").get()
-        source_url = response.urljoin(canonical) if canonical else response.url
-
-        image_url = response.css("meta[property='og:image']::attr(content)").get()
-
-        raw_payload = {
-            "title": title,
-            "artist": artist,
-            "meta_description": meta_description,
-            "source_url": source_url,
-        }
+        artist_name = raw_payload.get("artistDisplayName")
+        title = raw_payload.get("title")
+        object_date = raw_payload.get("objectDate")
+        medium = raw_payload.get("medium")
+        image_url = raw_payload.get("primaryImage")
 
         item = ArtworkItem()
-        item["crawl_run_id"] = self.crawl_run_id
         item["source_name"] = "The Metropolitan Museum of Art"
         item["source_domain"] = "metmuseum.org"
-        item["source_url"] = source_url
-        item["source_record_id"] = source_url.rstrip("/").split("/")[-1]
-        item["artist_name"] = artist
+        item["source_url"] = raw_payload.get("objectURL") or object_api_url
+        item["source_record_id"] = object_id
+        item["artist_name"] = artist_name
         item["artwork_title"] = title
-        item["artwork_date_text"] = None
-        item["medium_text"] = None
-        item["dimensions_text"] = None
+        item["artwork_date_text"] = object_date
+        item["medium_text"] = medium
+        item["dimensions_text"] = raw_payload.get("dimensions")
         item["price_text"] = None
         item["currency_text"] = None
         item["gallery_name"] = None
         item["institution_name"] = "The Metropolitan Museum of Art"
-        item["department_name"] = None
+        item["department_name"] = raw_payload.get("department")
         item["image_url"] = image_url
-        item["thumbnail_url"] = image_url
-        item["description"] = meta_description
+        item["thumbnail_url"] = raw_payload.get("primaryImageSmall")
+        item["description"] = raw_payload.get("creditLine") or raw_payload.get("objectName")
         item["raw_payload"] = raw_payload
-        item["content_hash"] = content_hash(source_url, artist, title, image_url, meta_description)
+        item["content_hash"] = content_hash(
+            object_id,
+            title,
+            artist_name,
+            object_date,
+            medium,
+            image_url,
+        )
         item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
+        item["crawl_run_id"] = self.crawl_run_id
 
         yield item
