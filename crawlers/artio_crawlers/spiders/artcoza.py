@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
 import scrapy
@@ -20,18 +21,45 @@ class ArtCoZaSpider(scrapy.Spider):
         "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
     }
 
+    NON_ARTIST_ROOT_PATHS = {
+        "index.php",
+        "weblinks",
+        "quiz",
+        "myartcoza",
+        "contact",
+        "gallery",
+        "advertise",
+        "about",
+        "articles",
+        "news",
+        "exhibitions",
+        "events",
+        "artists",
+    }
+
     def __init__(
         self,
         max_artists=25,
         max_records=100,
+        full_crawl=False,
         crawl_run_id=None,
         dry_run=False,
         *args,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self.max_artists = int(max_artists)
-        self.max_records = int(max_records)
+        self.full_crawl = str(full_crawl).lower() in {"true", "1", "yes"}
+
+        user_max_artists = int(max_artists)
+        user_max_records = int(max_records)
+
+        if self.full_crawl:
+            self.max_artists = 0 if user_max_artists == 0 else user_max_artists
+            self.max_records = 0 if user_max_records == 0 else user_max_records
+        else:
+            self.max_artists = user_max_artists or 25
+            self.max_records = user_max_records or 100
+
         self.crawl_run_id = crawl_run_id
         self.dry_run = str(dry_run).lower() in {"true", "1", "yes"}
 
@@ -41,15 +69,22 @@ class ArtCoZaSpider(scrapy.Spider):
         self._visited_artwork_pages: set[str] = set()
         self._emitted_record_keys: set[str] = set()
 
+        self.candidate_artist_links_found = 0
+        self.filtered_artist_profile_links = 0
+        self.skipped_non_artist_links = 0
+        self.records_per_artist: dict[str, int] = {}
+
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
-        self.logger.info("Found %d artist links on %s", len(artist_links), response.url)
         self.logger.info(
-            "First 5 artist URLs: %s",
-            [response.urljoin(link) for link in artist_links[:5]],
+            "Artist directory stats: candidates=%d filtered=%d skipped=%d",
+            self.candidate_artist_links_found,
+            self.filtered_artist_profile_links,
+            self.skipped_non_artist_links,
         )
+
         for href in artist_links:
-            if self.artists_seen >= self.max_artists:
+            if self._artist_limit_reached():
                 break
 
             artist_url = response.urljoin(href)
@@ -61,24 +96,24 @@ class ArtCoZaSpider(scrapy.Spider):
             yield response.follow(artist_url, callback=self.parse_artist_profile)
 
         next_page = response.css("a.next::attr(href), a[rel='next']::attr(href)").get()
-        if next_page and self.artists_seen < self.max_artists:
+        if next_page and not self._artist_limit_reached():
             yield response.follow(next_page, callback=self.parse)
 
     def parse_artist_profile(self, response: scrapy.http.Response):
         artist_name = self._extract_artist_name(response)
         artist_profile_url = response.url
-        found_profile_records = 0
+        per_artist_count = 0
 
         for item in self._extract_profile_artwork_items(response, artist_name, artist_profile_url):
-            if self.records_seen >= self.max_records:
+            if self._record_limit_reached():
                 break
             self.records_seen += 1
-            found_profile_records += 1
+            per_artist_count += 1
             yield item
 
         section_links = self._extract_artwork_section_links(response)
         for href in section_links:
-            if self.records_seen >= self.max_records:
+            if self._record_limit_reached():
                 break
             section_url = response.urljoin(href)
             if section_url in self._visited_artwork_pages:
@@ -93,20 +128,27 @@ class ArtCoZaSpider(scrapy.Spider):
                 },
             )
 
-        if found_profile_records == 0:
-            self.logger.info("No artwork records found on profile page: %s", response.url)
+        self.records_per_artist[artist_profile_url] = self.records_per_artist.get(artist_profile_url, 0) + per_artist_count
+        self.logger.info(
+            "Artist processed: url=%s name=%s records=%d",
+            artist_profile_url,
+            artist_name,
+            self.records_per_artist[artist_profile_url],
+        )
 
     def parse_artwork_section(self, response: scrapy.http.Response):
         artist_name = response.meta.get("artist_name")
         artist_profile_url = response.meta.get("artist_profile_url")
+        artist_key = artist_profile_url or response.url
 
         for item in self._extract_artwork_items(response, artist_name, artist_profile_url):
-            if self.records_seen >= self.max_records:
+            if self._record_limit_reached():
                 break
             self.records_seen += 1
+            self.records_per_artist[artist_key] = self.records_per_artist.get(artist_key, 0) + 1
             yield item
 
-        if self.records_seen >= self.max_records:
+        if self._record_limit_reached():
             return
 
         next_page = response.css("a.next::attr(href), a[rel='next']::attr(href)").get()
@@ -120,7 +162,7 @@ class ArtCoZaSpider(scrapy.Spider):
             "//a[contains(@href, '/artworks/') or contains(@class, 'artwork')]/@href"
         ).getall()
         for href in detail_links:
-            if self.records_seen >= self.max_records:
+            if self._record_limit_reached():
                 break
             detail_url = response.urljoin(href)
             if detail_url in self._visited_artwork_pages:
@@ -130,49 +172,67 @@ class ArtCoZaSpider(scrapy.Spider):
 
     def _extract_artist_profile_links(self, response: scrapy.http.Response) -> list[str]:
         candidates = response.xpath("//a[@href]/@href").getall()
-        excluded_root_paths = {
-            "artists",
-            "exhibitions",
-            "training",
-            "auctions",
-            "galleries",
-            "websites",
-            "art-quiz",
-            "art-videos",
-            "watch-list",
-            "blog",
-            "my",
-        }
+        self.candidate_artist_links_found += len(candidates)
+
         out: list[str] = []
         for href in candidates:
             absolute = response.urljoin(href)
-            parsed = urlparse(absolute)
-            if parsed.netloc not in {"art.co.za", "www.art.co.za"}:
-                continue
-            path = parsed.path.rstrip("/")
-            if not path or path == "/artists":
-                continue
-            segments = [segment for segment in path.split("/") if segment]
-            if not segments:
-                continue
-            if segments[0] == "artists":
-                if len(segments) == 1:
-                    continue
-                if len(segments) == 2 and len(segments[1]) == 1:
-                    continue
-            elif len(segments) == 1:
-                if segments[0] in excluded_root_paths:
-                    continue
+            if self._is_artist_profile_url(absolute):
+                out.append(absolute)
             else:
-                continue
-            out.append(href)
-        return list(dict.fromkeys(out))
+                self.skipped_non_artist_links += 1
+
+        deduped_links = list(dict.fromkeys(out))
+        self.filtered_artist_profile_links += len(deduped_links)
+        return deduped_links
+
+    def _is_artist_profile_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        if parsed.netloc not in {"art.co.za", "www.art.co.za"}:
+            return False
+        if parsed.query or parsed.fragment:
+            return False
+
+        path = parsed.path.strip("/")
+        if not path:
+            return False
+
+        lower_path = path.lower()
+        if lower_path.endswith(".php"):
+            return False
+
+        segments = [s for s in lower_path.split("/") if s]
+        if len(segments) != 1:
+            return False
+
+        slug = segments[0]
+        if slug in self.NON_ARTIST_ROOT_PATHS:
+            return False
+
+        # avoid hidden utility/file-like links
+        suffix = PurePosixPath(slug).suffix
+        if suffix and suffix != ".coza":
+            return False
+
+        if slug.startswith("index"):
+            return False
+
+        return True
 
     def _extract_artist_name(self, response: scrapy.http.Response) -> str | None:
-        for selector in ["h1::text", "h2::text", ".artist-name::text", "title::text"]:
+        selectors = [
+            "h1::text",
+            "h2::text",
+            ".artist-name::text",
+            ".profile h1::text",
+            ".profile h2::text",
+            "title::text",
+        ]
+        for selector in selectors:
             value = response.css(selector).get()
             if value and value.strip():
-                return value.strip()
+                cleaned = " ".join(value.split())
+                return cleaned.replace("| Art.co.za", "").replace("- Art.co.za", "").strip()
         return None
 
     def _extract_artwork_section_links(self, response: scrapy.http.Response) -> list[str]:
@@ -198,37 +258,35 @@ class ArtCoZaSpider(scrapy.Spider):
         artist_name: str | None,
         artist_profile_url: str | None,
     ):
-        nodes = response.xpath("//article | //li | //div[contains(@class, 'art')]")
+        nodes = response.xpath("//article | //li | //figure | //div[contains(@class, 'art')]")
         for node in nodes:
-            title = self._first_text(
-                node,
-                [
-                    ".//h1/text()",
-                    ".//h2/text()",
-                    ".//h3/text()",
-                    ".//a[contains(@class, 'title')]/text()",
-                    ".//img/@alt",
-                ],
-            )
-            image_url = node.xpath(".//img/@src").get() or node.xpath(".//img/@data-src").get()
-            if image_url:
-                image_url = response.urljoin(image_url)
-            source_url = node.xpath(".//a[1]/@href").get()
-            source_url = response.urljoin(source_url) if source_url else response.url
+            image_src = node.xpath(".//img/@src").get() or node.xpath(".//img/@data-src").get()
+            if not image_src:
+                continue
+            image_url = response.urljoin(image_src)
 
-            if not title and not image_url:
+            image_alt = node.xpath(".//img/@alt").get()
+            image_title = node.xpath(".//img/@title").get()
+            caption = self._first_text(node, [".//figcaption//text()", ".//*[contains(@class,'caption')]//text()"])
+
+            source_href = node.xpath(".//a[1]/@href").get()
+            source_url = response.urljoin(source_href) if source_href else (artist_profile_url or response.url)
+
+            title = self._infer_title(image_url, image_alt, image_title, caption, node)
+            if not title:
                 continue
 
-            dedupe_key = f"{source_url}|{image_url or title or ''}"
+            dedupe_key = f"{source_url}|{image_url}|{title}"
             if dedupe_key in self._emitted_record_keys:
                 continue
             self._emitted_record_keys.add(dedupe_key)
 
             raw_payload = {
                 "artist_profile_url": artist_profile_url,
-                "source_page": response.url,
-                "title": title,
-                "image_url": image_url,
+                "image_src": image_src,
+                "image_alt": image_alt,
+                "image_title": image_title,
+                "caption": caption,
             }
 
             item = ArtworkItem()
@@ -248,7 +306,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["department_name"] = None
             item["image_url"] = image_url
             item["thumbnail_url"] = image_url
-            item["description"] = self._first_text(node, [".//p/text()", ".//*[contains(@class,'description')]/text()"])
+            item["description"] = caption
             item["raw_payload"] = raw_payload
             item["content_hash"] = content_hash(source_url, image_url or title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -261,29 +319,42 @@ class ArtCoZaSpider(scrapy.Spider):
         artist_name: str | None,
         artist_profile_url: str | None,
     ):
-        image_nodes = response.xpath(
-            "//img[contains(translate(@alt, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
-            " | //img[contains(translate(@title, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
-            " | //a[contains(@href, '/uploads/')]/img"
-        )
+        image_nodes = response.xpath("//img")
         for node in image_nodes:
-            image_url = node.xpath("./@src").get() or node.xpath("./@data-src").get()
-            if not image_url:
+            image_src = node.xpath("./@src").get() or node.xpath("./@data-src").get()
+            if not image_src:
                 continue
-            image_url = response.urljoin(image_url)
-            title = self._first_text(node, ["./@alt", "./@title"]) or "Artwork"
-            source_url = response.url
+            image_url = response.urljoin(image_src)
+            image_alt = node.xpath("./@alt").get()
+            image_title = node.xpath("./@title").get()
+            caption = self._first_text(
+                node,
+                [
+                    "./ancestor::figure[1]//figcaption//text()",
+                    "./ancestor::*[contains(@class,'art')][1]//*[contains(@class,'caption')]//text()",
+                ],
+            )
+            title = self._infer_title(image_url, image_alt, image_title, caption)
+            if not title:
+                continue
 
-            dedupe_key = f"{source_url}|{image_url}"
+            # Skip obvious logos/icons.
+            image_path = urlparse(image_url).path.lower()
+            if any(token in image_path for token in ("logo", "icon", "banner")):
+                continue
+
+            source_url = artist_profile_url or response.url
+            dedupe_key = f"{source_url}|{image_url}|{title}"
             if dedupe_key in self._emitted_record_keys:
                 continue
             self._emitted_record_keys.add(dedupe_key)
 
             raw_payload = {
                 "artist_profile_url": artist_profile_url,
-                "source_page": response.url,
-                "title": title,
-                "image_url": image_url,
+                "image_src": image_src,
+                "image_alt": image_alt,
+                "image_title": image_title,
+                "caption": caption,
             }
 
             item = ArtworkItem()
@@ -303,12 +374,23 @@ class ArtCoZaSpider(scrapy.Spider):
             item["department_name"] = None
             item["image_url"] = image_url
             item["thumbnail_url"] = image_url
-            item["description"] = None
+            item["description"] = caption
             item["raw_payload"] = raw_payload
             item["content_hash"] = content_hash(source_url, image_url)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
             item["crawl_run_id"] = self.crawl_run_id
             yield item
+
+    def closed(self, reason: str):
+        self.logger.info(
+            "Crawl summary: reason=%s artists_visited=%d artwork_records=%d candidates=%d filtered=%d skipped=%d",
+            reason,
+            self.artists_seen,
+            self.records_seen,
+            self.candidate_artist_links_found,
+            self.filtered_artist_profile_links,
+            self.skipped_non_artist_links,
+        )
 
     @staticmethod
     def _first_text(node, xpaths: list[str]) -> str | None:
@@ -316,4 +398,37 @@ class ArtCoZaSpider(scrapy.Spider):
             value = node.xpath(xp).get()
             if value and value.strip():
                 return " ".join(value.split())
+        return None
+
+    def _artist_limit_reached(self) -> bool:
+        return self.max_artists > 0 and self.artists_seen >= self.max_artists
+
+    def _record_limit_reached(self) -> bool:
+        return self.max_records > 0 and self.records_seen >= self.max_records
+
+    @staticmethod
+    def _infer_title(
+        image_url: str,
+        image_alt: str | None,
+        image_title: str | None,
+        caption: str | None,
+        node=None,
+    ) -> str | None:
+        candidates = [image_alt, image_title, caption]
+        if node is not None:
+            candidates.extend(
+                [
+                    node.xpath(".//h1/text()").get(),
+                    node.xpath(".//h2/text()").get(),
+                    node.xpath(".//h3/text()").get(),
+                    node.xpath(".//a[contains(@class, 'title')]/text()").get(),
+                ]
+            )
+        for value in candidates:
+            if value and value.strip():
+                return " ".join(value.split())
+
+        image_name = PurePosixPath(urlparse(image_url).path).stem
+        if image_name:
+            return image_name.replace("-", " ").replace("_", " ").strip().title()
         return None
