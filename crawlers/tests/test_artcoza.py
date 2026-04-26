@@ -49,6 +49,9 @@ def test_non_artist_links_are_excluded() -> None:
             <a href="/artists/">artists</a>
             <a href="/contact/">contact</a>
             <a href="/news/">news</a>
+            <a href="/watch-list/">watch list</a>
+            <a href="/galleries/">galleries</a>
+            <a href="/auctions/">auctions</a>
             <a href="/utility.php?id=abc">utility</a>
         </body></html>
         """,
@@ -57,7 +60,7 @@ def test_non_artist_links_are_excluded() -> None:
     links = spider._extract_artist_profile_links(response)
 
     assert links == ["https://www.art.co.za/hoseamatlou/"]
-    assert spider.skipped_non_artist_links == 6
+    assert spider.skipped_non_artist_links == 9
 
 
 def test_parse_respects_max_artists() -> None:
@@ -94,8 +97,8 @@ def test_profile_page_extracts_visible_artwork_images() -> None:
         <html><body>
           <h1>Nicky Liebenberg</h1>
           <img src="/images/logo.png" alt="Site Logo" />
-          <img src="/images/work1.jpg" alt="Nicky Liebenberg Artwork" />
-          <img src="/images/work2.jpg" title="Artwork detail" />
+          <img src="/nickyliebenberg/work1.jpg" alt="Nicky Liebenberg Artwork" />
+          <img src="/nickyliebenberg/work2.jpg" title="Artwork detail" />
         </body></html>
         """,
     )
@@ -117,7 +120,7 @@ def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
           <article>
             <h2>Sunset Over Cape Town</h2>
             <a href="/jane-doe/artwork/sunset-over-cape-town/">details</a>
-            <img src="/images/sunset.jpg" alt="Sunset Over Cape Town" />
+            <img src="/jane-doe/images/sunset.jpg" alt="Sunset Over Cape Town" />
             <figcaption>Oil on canvas.</figcaption>
           </article>
         </body></html>
@@ -133,7 +136,7 @@ def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     item = items[0]
     assert item["artist_name"] == "Jane Doe"
     assert item["source_url"] == "https://www.art.co.za/jane-doe/artwork/sunset-over-cape-town/"
-    assert item["image_url"] == "https://www.art.co.za/images/sunset.jpg"
+    assert item["image_url"] == "https://www.art.co.za/jane-doe/images/sunset.jpg"
     assert item["source_domain"] == "art.co.za"
 
 
@@ -177,7 +180,7 @@ def test_placeholder_and_invalid_records_are_skipped() -> None:
           </article>
           <article>
             <a href="/jane-doe/artwork/kept-piece/">details</a>
-            <img src="/images/real-piece.jpg" alt="Golden Sunrise" />
+            <img src="/jane-doe/images/real-piece.jpg" alt="Golden Sunrise" />
           </article>
         </body></html>
         """,
@@ -188,7 +191,7 @@ def test_placeholder_and_invalid_records_are_skipped() -> None:
 
     assert len(items) == 1
     assert items[0]["source_url"] == "https://www.art.co.za/jane-doe/"
-    assert items[0]["image_url"] == "https://www.art.co.za/images/real-piece.jpg"
+    assert items[0]["image_url"] == "https://www.art.co.za/jane-doe/images/real-piece.jpg"
     assert items[0]["artist_name"] == "Jane Doe"
     assert spider.skipped_placeholder_image >= 2
 
@@ -209,3 +212,83 @@ def test_invalid_artist_page_name_is_rejected() -> None:
     items = [obj for obj in outputs if not isinstance(obj, Request)]
     assert items == []
     assert spider.skipped_invalid_artist_page >= 1
+
+
+def test_reserved_root_paths_are_excluded_from_artist_profiles() -> None:
+    spider = ArtCoZaSpider(max_artists=10)
+    response = _html_response(
+        "https://www.art.co.za/artists/",
+        """
+        <html><body>
+            <a href="/watch-list/">Watch List</a>
+            <a href="/galleries/">Art Galleries</a>
+            <a href="/auctions/">Art Auctions</a>
+            <a href="/artist-good/">Good Artist</a>
+        </body></html>
+        """,
+    )
+
+    links = spider._extract_artist_profile_links(response)
+    assert links == ["https://www.art.co.za/artist-good/"]
+
+
+def test_follow_png_is_excluded_from_profile_items() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Jane Doe</h1>
+          <img src="/jane-doe/follow.png" alt="Follow" />
+          <img src="/jane-doe/actual-work.jpg" alt="Actual Work" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    assert len(items) == 1
+    assert items[0]["image_url"] == "https://www.art.co.za/jane-doe/actual-work.jpg"
+
+
+def test_slug_scoped_image_required_for_profile_and_artwork_items() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    profile_response = _html_response(
+        "https://www.art.co.za/ruhanjansevanvuuren/",
+        """
+        <html><body>
+          <h1>Ruhan Janse Van Vuuren</h1>
+          <img src="/images/not-scoped.jpg" alt="Nope" />
+        </body></html>
+        """,
+    )
+
+    profile_outputs = list(spider.parse_artist_profile(profile_response))
+    profile_items = [obj for obj in profile_outputs if not isinstance(obj, Request)]
+    assert profile_items == []
+
+    section_response = _html_response(
+        "https://www.art.co.za/ruhanjansevanvuuren/artworks/",
+        """
+        <html><body>
+          <article>
+            <a href="/ruhanjansevanvuuren/artwork/valid-piece/">details</a>
+            <img src="/ruhanjansevanvuuren/ruhan_janse_van_vuuren_2024_52.jpg" alt="Valid Piece" />
+          </article>
+          <article>
+            <a href="/ruhanjansevanvuuren/artwork/invalid-piece/">details</a>
+            <img src="/galleries/listevent005.jpg" alt="Invalid Piece" />
+          </article>
+        </body></html>
+        """,
+    )
+    section_response.meta["artist_name"] = "Ruhan Janse Van Vuuren"
+    section_response.meta["artist_profile_url"] = "https://www.art.co.za/ruhanjansevanvuuren/"
+
+    section_outputs = list(spider.parse_artwork_section(section_response))
+    section_items = [obj for obj in section_outputs if not isinstance(obj, Request)]
+    assert len(section_items) == 1
+    assert (
+        section_items[0]["image_url"]
+        == "https://www.art.co.za/ruhanjansevanvuuren/ruhan_janse_van_vuuren_2024_52.jpg"
+    )
