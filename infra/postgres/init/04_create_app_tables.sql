@@ -53,3 +53,45 @@ CREATE TABLE IF NOT EXISTS app.artist_profile_edits (
 
 CREATE INDEX IF NOT EXISTS idx_artist_profile_edits_artist
 ON app.artist_profile_edits (artist_name, source_domain, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS app.data_quality_flags (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    entity_type TEXT NOT NULL,
+    entity_id TEXT,
+    artist_name TEXT,
+    issue_type TEXT NOT NULL,
+    notes TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_by TEXT,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    resolved_by TEXT,
+    resolved_at TIMESTAMPTZ,
+    resolution_notes TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_flags_status
+ON app.data_quality_flags (status);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_flags_entity_type
+ON app.data_quality_flags (entity_type);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_flags_artist_name
+ON app.data_quality_flags (artist_name);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_flags_issue_type
+ON app.data_quality_flags (issue_type);
+
+CREATE INDEX IF NOT EXISTS idx_data_quality_flags_created_at_desc
+ON app.data_quality_flags (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS app.artist_moderation_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    artist_name TEXT NOT NULL,
+    source_domain TEXT NOT NULL DEFAULT 'art.co.za',
+    is_hidden BOOLEAN NOT NULL DEFAULT false,
+    canonical_artist_name TEXT,
+    reason TEXT,
+    updated_by TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (artist_name, source_domain)
+);

@@ -12,7 +12,7 @@ async function api(path, options = {}) {
   return res.json()
 }
 
-function getArtists({ search = '', limit = 100, offset = 0 } = {}) {
+function getArtists({ search = '', limit = 100, offset = 0, includeHidden = false } = {}) {
   const params = new URLSearchParams({
     limit: String(limit),
     offset: String(offset),
@@ -21,6 +21,7 @@ function getArtists({ search = '', limit = 100, offset = 0 } = {}) {
   if (search?.trim()) {
     params.set('search', search.trim())
   }
+  if (includeHidden) params.set('include_hidden', 'true')
 
   return api(`/api/artists?${params.toString()}`)
 }
@@ -40,13 +41,56 @@ function getModerationSummary() {
   return api('/api/moderation/queues')
 }
 
-function getModerationQueue(queueName, { limit = 100, offset = 0 } = {}) {
-  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+function getModerationQueue(queueName, { limit = 100, offset = 0, status = 'open' } = {}) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset), status })
   return api(`/api/moderation/queue/${encodeURIComponent(queueName)}?${params.toString()}`)
 }
 
 function createDataQualityFlag(payload) {
   return api('/api/moderation/flags', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function getModerationFlags(params = {}) {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') search.set(key, String(value))
+  })
+  return api(`/api/moderation/flags?${search.toString()}`)
+}
+
+function resolveModerationFlag(flagId, payload) {
+  return api(`/api/moderation/flags/${encodeURIComponent(flagId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function reopenModerationFlag(flagId, payload) {
+  return api(`/api/moderation/flags/${encodeURIComponent(flagId)}/reopen`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function updateArtistModeration(artistName, payload) {
+  return api(`/api/artists/${encodeURIComponent(artistName)}/moderation`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function approveArtwork(artworkId, payload) {
+  return api(`/api/artworks/${encodeURIComponent(artworkId)}/approve`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+function rejectArtwork(artworkId, payload) {
+  return api(`/api/artworks/${encodeURIComponent(artworkId)}/reject`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
@@ -234,6 +278,12 @@ function ArtistProfilePage() {
   return (
     <section>
       <h2>{displayName}</h2>
+      {artist.is_hidden && (
+        <p className="moderation-warning">This artist is hidden from browsing.</p>
+      )}
+      {artist.canonical_artist_name && (
+        <p><strong>Canonical artist name:</strong> {artist.canonical_artist_name}</p>
+      )}
       <p><strong>Artwork count:</strong> {artist.artwork_count ?? artworks.length ?? 0}</p>
       {artist.original_artist_bio && (
         <p>
@@ -387,10 +437,45 @@ function ModerationFlagForm({ item, queueName }) {
   )
 }
 
-function ModerationQueueList({ queueName, items }) {
+function ModerationQueueList({ queueName, items, onRefresh }) {
   const config = MODERATION_QUEUE_CONFIG[queueName]
   if (!config) return <p className="error-text">Unknown queue.</p>
   if (items.length === 0) return <p>No records in this queue.</p>
+
+  async function toggleHidden(artistName, isHidden) {
+    await updateArtistModeration(artistName, {
+      is_hidden: isHidden,
+      reason: isHidden ? 'Hidden from moderation queue' : 'Unhidden from moderation queue',
+      updated_by: 'admin',
+    })
+    onRefresh()
+  }
+
+  async function setCanonical(artistName) {
+    const canonical = window.prompt(`Canonical artist name for "${artistName}"?`)
+    if (canonical === null) return
+    await updateArtistModeration(artistName, {
+      is_hidden: false,
+      canonical_artist_name: canonical.trim() || null,
+      reason: 'Canonical name set from moderation queue',
+      updated_by: 'admin',
+    })
+    onRefresh()
+  }
+
+  async function reviewArtwork(item, type) {
+    const notes = window.prompt(`${type === 'approve' ? 'Approval' : 'Rejection'} notes`, '') ?? ''
+    if (type === 'approve') {
+      await approveArtwork(item.artwork_id, { reviewer: 'admin', notes })
+    } else {
+      await rejectArtwork(item.artwork_id, {
+        reviewer: 'admin',
+        notes,
+        rejection_reason: notes || 'Rejected by admin',
+      })
+    }
+    onRefresh()
+  }
 
   return (
     <div className="queue-list">
@@ -403,8 +488,15 @@ function ModerationQueueList({ queueName, items }) {
               <p><strong>Artworks:</strong> {item.artwork_count ?? 0}</p>
               <p>{item.artist_bio ? `${item.artist_bio.slice(0, 220)}${item.artist_bio.length > 220 ? '...' : ''}` : 'No bio available'}</p>
               {item.edited_bio && <p><strong>Manual bio set.</strong> {item.edited_by ? `By ${item.edited_by}` : ''} {item.edited_at || ''}</p>}
+              <p className="flag-status">Open flags: {item.open_flags_count ?? 0}</p>
+              {item.is_hidden ? <span className="hidden-badge">Hidden</span> : null}
+              {item.canonical_artist_name ? <p><strong>Canonical:</strong> {item.canonical_artist_name}</p> : null}
               {item.profile_url && <p><a href={item.profile_url} target="_blank" rel="noreferrer">Profile source</a></p>}
-              <p><Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>Open artist</Link></p>
+              <div className="action-row">
+                <Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>Open artist profile</Link>
+                <button onClick={() => toggleHidden(item.artist_name, !item.is_hidden)}>{item.is_hidden ? 'Unhide artist' : 'Hide artist'}</button>
+                <button onClick={() => setCanonical(item.artist_name)}>Set canonical artist name</button>
+              </div>
             </>
           ) : (
             <>
@@ -412,8 +504,13 @@ function ModerationQueueList({ queueName, items }) {
               <h3>{item.artwork_title || 'Untitled artwork'}</h3>
               <p><strong>Artist:</strong> <Link to={`/artists/${encodeURIComponent(item.artist_name || '')}`}>{item.artist_name || 'Unknown artist'}</Link></p>
               <p><strong>Status:</strong> {item.review_status || 'pending'}</p>
+              {item.rejection_reason && <p><strong>Rejection reason:</strong> {item.rejection_reason}</p>}
               {item.source_url && <p><a href={item.source_url} target="_blank" rel="noreferrer">Source URL</a></p>}
-              {item.artwork_id && <p><Link to={`/artworks/${item.artwork_id}`}>Open artwork</Link></p>}
+              <div className="action-row">
+                {item.artwork_id && <Link to={`/artworks/${item.artwork_id}`}>Open artwork detail</Link>}
+                {item.artwork_id && <button onClick={() => reviewArtwork(item, 'approve')}>Approve artwork</button>}
+                {item.artwork_id && <button onClick={() => reviewArtwork(item, 'reject')}>Reject artwork</button>}
+              </div>
             </>
           )}
           <ModerationFlagForm item={item} queueName={queueName} />
@@ -427,12 +524,16 @@ function ModerationPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [summary, setSummary] = React.useState({})
   const [records, setRecords] = React.useState([])
+  const [flags, setFlags] = React.useState([])
   const [loadingSummary, setLoadingSummary] = React.useState(true)
   const [loadingQueue, setLoadingQueue] = React.useState(false)
+  const [loadingFlags, setLoadingFlags] = React.useState(false)
   const [error, setError] = React.useState('')
   const selectedQueue = searchParams.get('queue') || ''
+  const tab = searchParams.get('tab') || 'queues'
+  const status = searchParams.get('status') || (tab === 'resolved' ? 'resolved' : 'open')
 
-  React.useEffect(() => {
+  const loadSummary = React.useCallback(() => {
     let mounted = true
     setLoadingSummary(true)
     getModerationSummary()
@@ -441,41 +542,104 @@ function ModerationPage() {
       .finally(() => mounted && setLoadingSummary(false))
     return () => { mounted = false }
   }, [])
+  React.useEffect(() => loadSummary(), [loadSummary])
 
-  React.useEffect(() => {
+  const loadQueue = React.useCallback(() => {
     if (!selectedQueue) {
       setRecords([])
-      return
+      return () => {}
     }
     let mounted = true
     setLoadingQueue(true)
     setError('')
-    getModerationQueue(selectedQueue, { limit: 100, offset: 0 })
+    getModerationQueue(selectedQueue, { limit: 100, offset: 0, status })
       .then((json) => mounted && setRecords(Array.isArray(json) ? json : []))
       .catch((err) => mounted && setError(err.message))
       .finally(() => mounted && setLoadingQueue(false))
     return () => { mounted = false }
-  }, [selectedQueue])
+  }, [selectedQueue, status])
+  React.useEffect(() => loadQueue(), [loadQueue])
+
+  React.useEffect(() => {
+    if (tab === 'queues') return
+    let mounted = true
+    setLoadingFlags(true)
+    getModerationFlags({ status: tab === 'resolved' ? 'resolved' : 'open', limit: 200 })
+      .then((json) => mounted && setFlags(Array.isArray(json) ? json : []))
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoadingFlags(false))
+    return () => { mounted = false }
+  }, [tab])
+
+  async function toggleFlag(flag, action) {
+    if (action === 'resolve') {
+      await resolveModerationFlag(flag.id, { resolved_by: 'admin', resolution_notes: 'Resolved from moderation UI' })
+    } else {
+      await reopenModerationFlag(flag.id, { reopened_by: 'admin', notes: 'Reopened from moderation UI' })
+    }
+    const nextStatus = tab === 'resolved' ? 'resolved' : 'open'
+    const updated = await getModerationFlags({ status: nextStatus, limit: 200 })
+    setFlags(Array.isArray(updated) ? updated : [])
+    loadSummary()
+    loadQueue()
+  }
 
   return (
     <section>
       <h2>Moderation</h2>
+      <div className="action-row">
+        <button onClick={() => setSearchParams({ tab: 'queues', queue: selectedQueue, status })}>Queues</button>
+        <button onClick={() => setSearchParams({ tab: 'flags', status: 'open' })}>Flags</button>
+        <button onClick={() => setSearchParams({ tab: 'resolved', status: 'resolved' })}>Resolved</button>
+      </div>
       {loadingSummary && <p>Loading moderation queues...</p>}
       {error && <p className="error-text">Failed to load moderation data: {error}</p>}
-      <div className="moderation-grid">
-        {Object.entries(MODERATION_QUEUE_CONFIG).map(([queueName, config]) => (
-          <article className="moderation-card" key={queueName}>
-            <h3>{config.title}</h3>
-            <p>{summary?.[config.summaryKey] ?? 0}</p>
-            <button onClick={() => setSearchParams({ queue: queueName })}>Open queue</button>
-          </article>
-        ))}
-      </div>
-      {selectedQueue && (
+      {tab === 'queues' && (
         <>
-          <h3>{MODERATION_QUEUE_CONFIG[selectedQueue]?.title || selectedQueue}</h3>
-          {loadingQueue ? <p>Loading queue records...</p> : <ModerationQueueList queueName={selectedQueue} items={records} />}
+          <div className="action-row">
+            <button onClick={() => setSearchParams({ tab: 'queues', queue: selectedQueue, status: 'open' })}>Open</button>
+            <button onClick={() => setSearchParams({ tab: 'queues', queue: selectedQueue, status: 'resolved' })}>Resolved</button>
+            <button onClick={() => setSearchParams({ tab: 'queues', queue: selectedQueue, status: 'all' })}>All</button>
+          </div>
+          <div className="moderation-grid">
+            {Object.entries(MODERATION_QUEUE_CONFIG).map(([queueName, config]) => (
+              <article className="moderation-card" key={queueName}>
+                <h3>{config.title}</h3>
+                <p>{summary?.[config.summaryKey] ?? 0}</p>
+                <button onClick={() => setSearchParams({ tab: 'queues', queue: queueName, status })}>Open queue</button>
+              </article>
+            ))}
+          </div>
+          {selectedQueue && (
+            <>
+              <h3>{MODERATION_QUEUE_CONFIG[selectedQueue]?.title || selectedQueue}</h3>
+              {loadingQueue ? <p>Loading queue records...</p> : <ModerationQueueList queueName={selectedQueue} items={records} onRefresh={loadQueue} />}
+            </>
+          )}
         </>
+      )}
+      {tab !== 'queues' && (
+        <div>
+          {loadingFlags ? <p>Loading flags...</p> : (
+            <div className="queue-list">
+              {flags.map((flag) => (
+                <article className="queue-item" key={flag.id}>
+                  <p><span className={`flag-status ${flag.status === 'resolved' ? 'resolved-badge' : ''}`}>{flag.status}</span></p>
+                  <p><strong>Entity:</strong> {flag.entity_type} {flag.entity_id || ''}</p>
+                  <p><strong>Artist:</strong> {flag.artist_name || '-'}</p>
+                  <p><strong>Issue:</strong> {flag.issue_type}</p>
+                  <p><strong>Notes:</strong> {flag.notes || '-'}</p>
+                  <p><strong>Created:</strong> {flag.created_by || '-'} / {flag.created_at || '-'}</p>
+                  <div className="action-row">
+                    {flag.status !== 'resolved' && <button onClick={() => toggleFlag(flag, 'resolve')}>Resolve</button>}
+                    {flag.status === 'resolved' && <button onClick={() => toggleFlag(flag, 'reopen')}>Reopen</button>}
+                  </div>
+                </article>
+              ))}
+              {flags.length === 0 && <p>No flags found.</p>}
+            </div>
+          )}
+        </div>
       )}
     </section>
   )
@@ -497,7 +661,8 @@ function ArtworkDetailPage() {
   async function decide(type) {
     const body = { reviewer: 'admin', notes }
     if (type === 'reject') body.rejection_reason = notes || 'Rejected by admin'
-    await api(`/api/artworks/${artworkId}/${type}`, { method: 'POST', body: JSON.stringify(body) })
+    if (type === 'approve') await approveArtwork(artworkId, body)
+    if (type === 'reject') await rejectArtwork(artworkId, body)
     await load()
   }
 
