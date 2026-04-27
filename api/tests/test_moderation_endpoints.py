@@ -36,6 +36,7 @@ class FakeCursor:
             self._row = {
                 "artists_missing_bio": 3,
                 "artists_short_bio": 4,
+                "artists_poor_bio": 2,
                 "artists_suspect_name": 1,
                 "artists_with_manual_bio": 5,
             }
@@ -52,6 +53,9 @@ class FakeCursor:
                     "source_domain": "art.co.za",
                     "profile_url": "https://example.com/artist",
                     "artist_bio": "short",
+                    "cleaned_artist_bio": "short",
+                    "bio_quality_score": 40,
+                    "bio_quality_flags": ["too_short"],
                     "original_artist_bio": "",
                     "edited_bio": None,
                     "edited_by": None,
@@ -129,6 +133,7 @@ def test_queue_summary_endpoint_returns_expected_keys(monkeypatch):
         "artworks_pending_review",
         "artists_missing_bio",
         "artists_short_bio",
+        "artists_poor_bio",
         "artists_suspect_name",
         "artists_with_manual_bio",
         "artists_without_events",

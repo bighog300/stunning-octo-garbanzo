@@ -144,6 +144,7 @@ QUEUE_SUMMARY_KEYS = [
     "artworks_pending_review",
     "artists_missing_bio",
     "artists_short_bio",
+    "artists_poor_bio",
     "artists_suspect_name",
     "artists_with_manual_bio",
     "artists_without_events",
@@ -165,6 +166,7 @@ def _queue_reason_sql(queue_name: str) -> str:
         "artworks-pending-review": "'pending_review'",
         "artists-missing-bio": "'missing_bio'",
         "artists-short-bio": "'short_bio'",
+        "artists-poor-bio": "'poor_bio_quality'",
         "artists-suspect-name": "'suspect_artist_name'",
         "artists-with-manual-bio": "'manual_bio_override'",
         "artists-without-events": "'missing_events'",
@@ -220,6 +222,9 @@ def moderation_queue_summary() -> dict[str, int]:
                           AND length(btrim(artist_bio)) < 120
                       ) AS artists_short_bio,
                       COUNT(*) FILTER (
+                        WHERE COALESCE(bio_quality_score, 100) < 60
+                      ) AS artists_poor_bio,
+                      COUNT(*) FILTER (
                         WHERE artist_name ILIKE %s
                            OR artist_name ILIKE %s
                            OR artist_name ILIKE %s
@@ -253,6 +258,7 @@ def moderation_queue_summary() -> dict[str, int]:
             "artworks_pending_review": artwork_counts.get("artworks_pending_review", 0) or 0,
             "artists_missing_bio": artist_counts.get("artists_missing_bio", 0) or 0,
             "artists_short_bio": artist_counts.get("artists_short_bio", 0) or 0,
+            "artists_poor_bio": artist_counts.get("artists_poor_bio", 0) or 0,
             "artists_suspect_name": artist_counts.get("artists_suspect_name", 0) or 0,
             "artists_with_manual_bio": artist_counts.get("artists_with_manual_bio", 0) or 0,
             "artists_without_events": artists_without_events,
@@ -281,6 +287,7 @@ def moderation_queue_records(
         "artists-short-bio": (
             "artist_bio IS NOT NULL AND btrim(artist_bio) <> '' AND length(btrim(artist_bio)) < 120"
         ),
+        "artists-poor-bio": "COALESCE(bio_quality_score, 100) < 60",
         "artists-suspect-name": (
             "artist_name ILIKE %s OR artist_name ILIKE %s OR artist_name ILIKE %s "
             "OR artist_name ILIKE %s OR artist_name ILIKE %s OR artist_name ILIKE %s"
@@ -316,6 +323,7 @@ def moderation_queue_records(
                     cur.execute(
                         f"""
                         SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.artist_bio, ap.original_artist_bio,
+                               ap.cleaned_artist_bio, ap.bio_quality_score, ap.bio_quality_flags,
                                ap.edited_artist_bio AS edited_bio, ap.bio_edited_by AS edited_by,
                                ap.bio_last_edited_at AS edited_at, ap.artwork_count, ap.last_seen,
                                COALESCE(dq.open_flags_count, 0) AS open_flags_count,
@@ -364,6 +372,7 @@ def moderation_queue_records(
                         f"""
                         SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.artist_bio,
                                ap.original_artist_bio, ap.edited_artist_bio AS edited_bio,
+                               ap.cleaned_artist_bio, ap.bio_quality_score, ap.bio_quality_flags,
                                ap.bio_edited_by AS edited_by, ap.bio_last_edited_at AS edited_at,
                                ap.artwork_count, ap.last_seen,
                                COALESCE(dq.open_flags_count, 0) AS open_flags_count,
@@ -640,7 +649,8 @@ def list_artists(
                 cur.execute(
                     f"""
                     SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
-                           ap.edited_artist_bio, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
+                           ap.edited_artist_bio, ap.cleaned_artist_bio, ap.bio_quality_score,
+                           ap.bio_quality_flags, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
                            ap.bio_last_edited_at, ap.artwork_count, ap.last_seen,
                            COALESCE(amo.is_hidden, false) AS is_hidden,
                            amo.canonical_artist_name,
@@ -698,7 +708,8 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
-                           ap.edited_artist_bio, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
+                           ap.edited_artist_bio, ap.cleaned_artist_bio, ap.bio_quality_score,
+                           ap.bio_quality_flags, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
                            ap.bio_last_edited_at, ap.artwork_count, ap.last_seen,
                            COALESCE(amo.is_hidden, false) AS is_hidden,
                            amo.canonical_artist_name,

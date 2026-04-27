@@ -224,6 +224,7 @@ function ArtistProfilePage() {
   const [editedBio, setEditedBio] = React.useState('')
   const [saveStatus, setSaveStatus] = React.useState('')
   const [isSaving, setIsSaving] = React.useState(false)
+  const [showRawBio, setShowRawBio] = React.useState(false)
 
   const loadProfile = React.useCallback(() => {
     let mounted = true
@@ -253,7 +254,9 @@ function ArtistProfilePage() {
 
   const { artist, artworks = [], events = [] } = profile
   const displayName = artist.artist_name || artistName
-  const currentBio = artist.artist_bio || ''
+  const cleanedBio = artist.cleaned_artist_bio || ''
+  const currentBio = cleanedBio || artist.artist_bio || ''
+  const rawBio = artist.original_artist_bio || ''
   const hasEditedBio = Boolean(artist.edited_artist_bio)
 
   async function onSaveBio() {
@@ -285,12 +288,28 @@ function ArtistProfilePage() {
         <p><strong>Canonical artist name:</strong> {artist.canonical_artist_name}</p>
       )}
       <p><strong>Artwork count:</strong> {artist.artwork_count ?? artworks.length ?? 0}</p>
-      {artist.original_artist_bio && (
+      {typeof artist.bio_quality_score === 'number' && (
         <p>
-          <strong>Original bio:</strong> {artist.original_artist_bio}
+          <strong>Bio quality score:</strong>{' '}
+          <span className="quality-badge">{artist.bio_quality_score}</span>
         </p>
       )}
+      {Array.isArray(artist.bio_quality_flags) && artist.bio_quality_flags.length > 0 && (
+        <p><strong>Bio flags:</strong> {artist.bio_quality_flags.join(', ')}</p>
+      )}
       <p><strong>Current bio:</strong> {currentBio || 'No bio available'}</p>
+      {rawBio && (
+        <div className="controls">
+          <button onClick={() => setShowRawBio((value) => !value)}>
+            {showRawBio ? 'Hide raw bio' : 'Show raw bio'}
+          </button>
+          {showRawBio && (
+            <p>
+              <strong>Raw bio:</strong> {rawBio}
+            </p>
+          )}
+        </div>
+      )}
       {hasEditedBio && artist.bio_last_edited_at && (
         <p>
           <strong>Last edited:</strong> {artist.bio_last_edited_at}
@@ -385,6 +404,7 @@ const MODERATION_QUEUE_CONFIG = {
   'artworks-pending-review': { title: 'Pending artwork review', summaryKey: 'artworks_pending_review', issueType: 'pending_review', type: 'artwork' },
   'artists-missing-bio': { title: 'Missing bios', summaryKey: 'artists_missing_bio', issueType: 'missing_bio', type: 'artist' },
   'artists-short-bio': { title: 'Short bios', summaryKey: 'artists_short_bio', issueType: 'short_bio', type: 'artist' },
+  'artists-poor-bio': { title: 'Poor bios', summaryKey: 'artists_poor_bio', issueType: 'poor_bio_quality', type: 'artist' },
   'artists-suspect-name': { title: 'Suspect artist names', summaryKey: 'artists_suspect_name', issueType: 'suspect_artist_name', type: 'artist' },
   'artists-with-manual-bio': { title: 'Manual bio overrides', summaryKey: 'artists_with_manual_bio', issueType: 'manual_bio_override', type: 'artist' },
   'artists-without-events': { title: 'Artists without events', summaryKey: 'artists_without_events', issueType: 'missing_events', type: 'artist' },
@@ -486,7 +506,14 @@ function ModerationQueueList({ queueName, items, onRefresh }) {
             <>
               <h3><Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>{item.artist_name || 'Unknown artist'}</Link></h3>
               <p><strong>Artworks:</strong> {item.artwork_count ?? 0}</p>
-              <p>{item.artist_bio ? `${item.artist_bio.slice(0, 220)}${item.artist_bio.length > 220 ? '...' : ''}` : 'No bio available'}</p>
+              {typeof item.bio_quality_score === 'number' && (
+                <p><strong>Bio quality:</strong> <span className="quality-badge">{item.bio_quality_score}</span></p>
+              )}
+              {Array.isArray(item.bio_quality_flags) && item.bio_quality_flags.length > 0 && (
+                <p><strong>Flags:</strong> {item.bio_quality_flags.join(', ')}</p>
+              )}
+              <p>{item.cleaned_artist_bio ? `${item.cleaned_artist_bio.slice(0, 220)}${item.cleaned_artist_bio.length > 220 ? '...' : ''}` : 'No cleaned bio available'}</p>
+              {item.original_artist_bio && <p><strong>Raw:</strong> {item.original_artist_bio.slice(0, 160)}{item.original_artist_bio.length > 160 ? '...' : ''}</p>}
               {item.edited_bio && <p><strong>Manual bio set.</strong> {item.edited_by ? `By ${item.edited_by}` : ''} {item.edited_at || ''}</p>}
               <p className="flag-status">Open flags: {item.open_flags_count ?? 0}</p>
               {item.is_hidden ? <span className="hidden-badge">Hidden</span> : null}
@@ -494,6 +521,7 @@ function ModerationQueueList({ queueName, items, onRefresh }) {
               {item.profile_url && <p><a href={item.profile_url} target="_blank" rel="noreferrer">Profile source</a></p>}
               <div className="action-row">
                 <Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>Open artist profile</Link>
+                <Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>Edit bio</Link>
                 <button onClick={() => toggleHidden(item.artist_name, !item.is_hidden)}>{item.is_hidden ? 'Unhide artist' : 'Hide artist'}</button>
                 <button onClick={() => setCanonical(item.artist_name)}>Set canonical artist name</button>
               </div>
