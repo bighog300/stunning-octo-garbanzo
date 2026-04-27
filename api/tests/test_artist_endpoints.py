@@ -1,4 +1,5 @@
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 import api.main as main
 
@@ -137,3 +138,16 @@ def test_artist_detail_not_found_returns_404(monkeypatch):
         assert False, "Expected HTTPException"
     except HTTPException as exc:
         assert exc.status_code == 404
+
+
+def test_list_artists_serializes_datetime_values(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    dt = datetime(2026, 4, 27, 12, 0, tzinfo=timezone.utc)
+
+    class DictLikeRow:
+        def __iter__(self):
+            return iter({"artist_name": "A", "last_seen": dt}.items())
+
+    serialized = main._serialize_rows([{"artist_name": "A", "last_seen": dt}, DictLikeRow()])
+    assert serialized[0]["last_seen"] == "2026-04-27T12:00:00+00:00"
+    assert serialized[1]["last_seen"] == "2026-04-27T12:00:00+00:00"
