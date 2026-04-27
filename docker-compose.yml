@@ -17,6 +17,9 @@ x-airflow-common: &airflow-common
     ARTIO_POSTGRES_USER: artio
     ARTIO_POSTGRES_PASSWORD: artio
     PYTHONPATH: /opt/artio/crawlers:/opt/artio
+    DBT_LOG_PATH: /tmp/dbt/logs
+    DBT_TARGET_PATH: /tmp/dbt/target
+    DBT_PACKAGES_INSTALL_PATH: /tmp/dbt/dbt_packages
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
@@ -130,6 +133,9 @@ services:
       ARTIO_POSTGRES_DB: artio
       ARTIO_POSTGRES_USER: artio
       ARTIO_POSTGRES_PASSWORD: artio
+      DBT_LOG_PATH: /tmp/dbt/logs
+      DBT_TARGET_PATH: /tmp/dbt/target
+      DBT_PACKAGES_INSTALL_PATH: /tmp/dbt/dbt_packages
     volumes:
       - ./dbt:/opt/artio/dbt
     working_dir: /opt/artio/dbt

@@ -8,6 +8,9 @@ model-paths: ["models"]
 seed-paths: ["seeds"]
 macro-paths: ["macros"]
 test-paths: ["tests"]
+log-path: "{{ env_var('DBT_LOG_PATH', 'logs') }}"
+target-path: "{{ env_var('DBT_TARGET_PATH', 'target') }}"
+packages-install-path: "{{ env_var('DBT_PACKAGES_INSTALL_PATH', 'dbt_packages') }}"
 
 models:
   artio_dbt:
