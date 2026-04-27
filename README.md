@@ -167,6 +167,24 @@ You can also reuse a pre-generated crawl export:
 python -m artio_cli.audit_artcoza_extraction --recrawl-jsonl /path/to/artcoza.jsonl
 ```
 
+Phase 4F adds an explicit artist-name backfill plan keyed by `source_record_id`:
+
+```bash
+python -m artio_cli.audit_artcoza_extraction --show-artist-backfill-updates 50 --print-json
+```
+
+To apply proposed artist-name updates to `raw.artworks`, opt in explicitly:
+
+```bash
+python -m artio_cli.audit_artcoza_extraction --apply
+```
+
+`--apply` is safe-guarded to updates where:
+- matched baseline/recrawl records have a changed artist name,
+- both sides have a non-empty matching `source_record_id`,
+- the recrawl artist name is non-empty,
+- and DB rows still match `artist_name_before` at update time.
+
 When running the audit inside Docker, the `api` service now includes `artio_cli` on
 `PYTHONPATH=/opt/artio`:
 

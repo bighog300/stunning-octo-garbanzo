@@ -2,6 +2,7 @@ from pathlib import Path
 
 from artio_cli.audit_artcoza_extraction import (
     _parse_records_content,
+    build_artist_name_backfill_plan,
     build_changed_records,
     build_matched_metrics,
     build_suspect_artist_names,
@@ -116,3 +117,35 @@ def test_suspect_artist_names_flags_expected_patterns():
     assert "single_token_with_known_slug_override" in reasons
     assert "contains_colon_exhibition_like" in reasons
     assert "name_too_long" in reasons
+
+
+def test_changed_records_marks_artist_name_changed_when_quality_same():
+    matched_pairs = [
+        (
+            _record(source_record_id="1", artist_name="Wrong Label"),
+            _record(source_record_id="1", artist_name="Correct Artist"),
+        )
+    ]
+
+    changed = build_changed_records(matched_pairs, show_changes=10)
+    assert len(changed) == 1
+    assert changed[0]["artist_name_changed"] is True
+    assert changed[0]["quality_delta"] == 0
+
+
+def test_artist_name_backfill_plan_is_source_record_id_guarded():
+    matched_pairs = [
+        (_record(source_record_id="1", artist_name="Old"), _record(source_record_id="1", artist_name="New")),
+        (_record(source_record_id="", artist_name="Old 2"), _record(source_record_id="2", artist_name="New 2")),
+        (_record(source_record_id="3", artist_name="Old 3"), _record(source_record_id="4", artist_name="New 3")),
+        (_record(source_record_id="5", artist_name="Old 5"), _record(source_record_id="5", artist_name="")),
+    ]
+
+    metrics, updates = build_artist_name_backfill_plan(matched_pairs, show_updates=10)
+
+    assert metrics.changed_artist_name_count == 4
+    assert metrics.update_candidate_count == 1
+    assert metrics.skipped_missing_source_record_id_count == 1
+    assert metrics.skipped_source_record_id_mismatch_count == 1
+    assert metrics.skipped_empty_after_name_count == 1
+    assert updates == [{"source_record_id": "1", "artist_name_before": "Old", "artist_name_after": "New"}]
