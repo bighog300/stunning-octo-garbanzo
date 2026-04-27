@@ -118,27 +118,29 @@ SELECT
 FROM analytics.mart_artist_activity;
 
 CREATE OR REPLACE VIEW app.artist_profiles AS
-WITH base_artworks AS (
+WITH artist_rollup AS (
     SELECT
-        COALESCE(ar.canonical_artist_name, ar.original_artist_name, ar.artist_name) AS effective_artist_name,
+        ar.artist_name,
         ar.source_domain,
-        ar.source_url,
-        ar.description,
-        ar.crawl_timestamp
+        COUNT(*) AS artwork_count,
+        MAX(ar.crawl_timestamp) AS last_seen
     FROM app.artwork_records ar
-    WHERE COALESCE(ar.canonical_artist_name, ar.original_artist_name, ar.artist_name) IS NOT NULL
-      AND ar.description IS NOT NULL
+    WHERE ar.artist_name IS NOT NULL
+    GROUP BY ar.artist_name, ar.source_domain
 ),
-base_profiles AS (
-    SELECT DISTINCT ON (effective_artist_name, source_domain)
-        effective_artist_name AS artist_name,
-        source_domain,
-        source_url AS profile_url,
-        description AS original_artist_bio,
-        COUNT(*) OVER (PARTITION BY effective_artist_name, source_domain) AS artwork_count,
-        MAX(crawl_timestamp) OVER (PARTITION BY effective_artist_name, source_domain) AS last_seen
-    FROM base_artworks
-    ORDER BY effective_artist_name, source_domain, crawl_timestamp DESC NULLS LAST
+latest_profile_row AS (
+    SELECT DISTINCT ON (ar.artist_name, ar.source_domain)
+        ar.artist_name,
+        ar.source_domain,
+        ar.source_url AS profile_url,
+        ar.description AS original_artist_bio
+    FROM app.artwork_records ar
+    WHERE ar.artist_name IS NOT NULL
+    ORDER BY
+        ar.artist_name,
+        ar.source_domain,
+        (ar.source_url IS NOT NULL AND ar.description IS NOT NULL) DESC,
+        ar.crawl_timestamp DESC NULLS LAST
 ),
 latest_bio_edits AS (
     SELECT DISTINCT ON (artist_name, source_domain)
@@ -152,16 +154,16 @@ latest_bio_edits AS (
     ORDER BY artist_name, source_domain, created_at DESC
 )
 SELECT
-    bp.artist_name,
-    bp.source_domain,
-    bp.profile_url,
-    COALESCE(lbe.edited_bio, bp.original_artist_bio) AS artist_bio,
-    bp.original_artist_bio,
+    r.artist_name,
+    r.source_domain,
+    p.profile_url,
+    COALESCE(lbe.edited_bio, p.original_artist_bio) AS artist_bio,
+    p.original_artist_bio,
     lbe.edited_bio,
     lbe.edited_by,
     lbe.edited_at,
-    bp.artwork_count,
-    bp.last_seen,
+    r.artwork_count,
+    r.last_seen,
     COALESCE(amo.is_hidden, false) AS is_hidden,
     amo.canonical_artist_name,
     amo.reason AS moderation_reason,
@@ -171,10 +173,13 @@ SELECT
     lbe.edited_by AS bio_edited_by,
     lbe.edit_notes AS bio_edit_notes,
     lbe.edited_at AS bio_last_edited_at
-FROM base_profiles bp
+FROM artist_rollup r
+LEFT JOIN latest_profile_row p
+    ON p.artist_name = r.artist_name
+   AND p.source_domain = r.source_domain
 LEFT JOIN latest_bio_edits lbe
-    ON lbe.artist_name = bp.artist_name
-   AND lbe.source_domain = bp.source_domain
+    ON lbe.artist_name = r.artist_name
+   AND lbe.source_domain = r.source_domain
 LEFT JOIN app.artist_moderation_overrides amo
-    ON amo.artist_name = bp.artist_name
-   AND amo.source_domain = bp.source_domain;
+    ON amo.artist_name = r.artist_name
+   AND amo.source_domain = r.source_domain;
