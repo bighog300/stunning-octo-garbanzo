@@ -92,6 +92,18 @@ class ArtCoZaSpider(scrapy.Spider):
         "frontpage",
         "front-page",
     )
+    PROFILE_SECTION_KEYWORDS = ("about", "biography", "artist statement", "profile", "cv")
+    PROFILE_TEXT_JUNK_TOKENS = (
+        "recent work",
+        "featured work",
+        "art in south africa",
+        "copyright",
+        "all rights reserved",
+        "share",
+        "facebook",
+        "instagram",
+        "twitter",
+    )
 
     def __init__(
         self,
@@ -186,9 +198,10 @@ class ArtCoZaSpider(scrapy.Spider):
             return
 
         artist_profile_url = response.url
+        profile_context = self._extract_artist_profile_context(response, artist_name, artist_profile_url)
         per_artist_count = 0
 
-        for item in self._extract_profile_artwork_items(response, artist_name, artist_profile_url):
+        for item in self._extract_profile_artwork_items(response, artist_name, artist_profile_url, profile_context):
             if self._record_limit_reached():
                 break
             self.records_seen += 1
@@ -209,6 +222,7 @@ class ArtCoZaSpider(scrapy.Spider):
                 meta={
                     "artist_name": artist_name,
                     "artist_profile_url": artist_profile_url,
+                    "profile_context": profile_context,
                 },
             )
 
@@ -230,12 +244,13 @@ class ArtCoZaSpider(scrapy.Spider):
     def parse_artwork_section(self, response: scrapy.http.Response):
         artist_name = response.meta.get("artist_name")
         artist_profile_url = response.meta.get("artist_profile_url")
+        profile_context = response.meta.get("profile_context") or {}
         artist_key = artist_profile_url or response.url
         seen_before = self.images_seen_per_artist.get(artist_key, 0)
         kept_before = self.images_kept_per_artist.get(artist_key, 0)
         skipped_before = self.images_skipped_per_artist.get(artist_key, 0)
 
-        for item in self._extract_artwork_items(response, artist_name, artist_profile_url):
+        for item in self._extract_artwork_items(response, artist_name, artist_profile_url, profile_context):
             if self._record_limit_reached():
                 break
             self.records_seen += 1
@@ -362,6 +377,7 @@ class ArtCoZaSpider(scrapy.Spider):
         response: scrapy.http.Response,
         artist_name: str | None,
         artist_profile_url: str | None,
+        profile_context: dict | None = None,
     ):
         nodes = response.xpath("//article | //li | //figure | //div[contains(@class, 'art')]")
         artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
@@ -427,6 +443,9 @@ class ArtCoZaSpider(scrapy.Spider):
                 "image_alt": image_alt,
                 "image_title": image_title,
                 "caption": caption,
+                "artist_bio": (profile_context or {}).get("artist_bio"),
+                "artist_statement": (profile_context or {}).get("artist_statement"),
+                "profile_text_blocks": (profile_context or {}).get("profile_text_blocks", []),
             }
 
             item = ArtworkItem()
@@ -446,7 +465,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["department_name"] = None
             item["image_url"] = image_url
             item["thumbnail_url"] = image_url
-            item["description"] = caption
+            item["description"] = (profile_context or {}).get("artist_bio") or caption
             item["raw_payload"] = raw_payload
             item["content_hash"] = content_hash("art.co.za", artist_slug, artist_name, image_url, title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -460,6 +479,7 @@ class ArtCoZaSpider(scrapy.Spider):
         response: scrapy.http.Response,
         artist_name: str | None,
         artist_profile_url: str | None,
+        profile_context: dict | None = None,
     ):
         image_nodes = response.xpath("//img")
         artist_slug = self._artist_slug_from_url(artist_profile_url or response.url)
@@ -523,6 +543,9 @@ class ArtCoZaSpider(scrapy.Spider):
                 "image_alt": image_alt,
                 "image_title": image_title,
                 "caption": caption,
+                "artist_bio": (profile_context or {}).get("artist_bio"),
+                "artist_statement": (profile_context or {}).get("artist_statement"),
+                "profile_text_blocks": (profile_context or {}).get("profile_text_blocks", []),
             }
 
             item = ArtworkItem()
@@ -542,7 +565,7 @@ class ArtCoZaSpider(scrapy.Spider):
             item["department_name"] = None
             item["image_url"] = image_url
             item["thumbnail_url"] = image_url
-            item["description"] = caption
+            item["description"] = (profile_context or {}).get("artist_bio") or caption
             item["raw_payload"] = raw_payload
             item["content_hash"] = content_hash("art.co.za", artist_slug, artist_name, image_url, title)
             item["crawl_timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -550,6 +573,51 @@ class ArtCoZaSpider(scrapy.Spider):
             self.emitted_records += 1
             self._track_artist_image_kept(artist_key)
             yield item
+
+    def _extract_artist_profile_context(
+        self,
+        response: scrapy.http.Response,
+        artist_name: str | None,
+        artist_profile_url: str | None,
+    ) -> dict:
+        del artist_name
+        blocks: list[str] = []
+        section_statement: str | None = None
+        for heading in response.xpath("//h1|//h2|//h3|//h4|//strong"):
+            heading_text = self._normalize_whitespace(" ".join(heading.xpath(".//text()").getall()))
+            lowered_heading = heading_text.lower()
+            if not any(keyword in lowered_heading for keyword in self.PROFILE_SECTION_KEYWORDS):
+                continue
+            section_parts: list[str] = []
+            for sibling in heading.xpath("following-sibling::*[position()<=6]"):
+                if sibling.root.tag in {"h1", "h2", "h3", "h4"}:
+                    break
+                sibling_text = self._clean_profile_text(" ".join(sibling.xpath(".//text()").getall()))
+                if sibling_text and not self._is_junk_profile_text_block(sibling_text):
+                    section_parts.append(sibling_text)
+            block_text = self._clean_profile_text("\n\n".join(section_parts))
+            if block_text:
+                blocks.append(block_text)
+                if "artist statement" in lowered_heading and not section_statement:
+                    section_statement = block_text
+
+        if not blocks:
+            fallback_candidates = response.xpath(
+                "//main//p//text() | //article//p//text() | //div[contains(@class,'profile')]//p//text() | //div[contains(@class,'bio')]//p//text()"
+            ).getall()
+            for value in fallback_candidates:
+                cleaned = self._clean_profile_text(value)
+                if cleaned and not self._is_junk_profile_text_block(cleaned):
+                    blocks.append(cleaned)
+
+        deduped_blocks = list(dict.fromkeys(blocks))
+        artist_bio = "\n\n".join(deduped_blocks) if deduped_blocks else None
+        return {
+            "artist_profile_url": artist_profile_url,
+            "artist_bio": artist_bio,
+            "artist_statement": section_statement,
+            "profile_text_blocks": deduped_blocks,
+        }
 
     def closed(self, reason: str):
         self.logger.info(
@@ -656,6 +724,24 @@ class ArtCoZaSpider(scrapy.Spider):
         if not value:
             return ""
         return re.sub(r"[\W_]+", " ", value.lower()).strip()
+
+    @staticmethod
+    def _normalize_whitespace(value: str | None) -> str:
+        if not value:
+            return ""
+        return " ".join(value.split())
+
+    def _clean_profile_text(self, value: str | None) -> str | None:
+        cleaned = self._normalize_whitespace(value)
+        if not cleaned:
+            return None
+        return cleaned.strip()
+
+    def _is_junk_profile_text_block(self, value: str | None) -> bool:
+        normalized = self._normalize_token_text(value)
+        if not normalized or len(normalized) < 20:
+            return True
+        return any(self._normalize_token_text(token) in normalized for token in self.PROFILE_TEXT_JUNK_TOKENS)
 
     def _contains_non_artwork_token(self, value: str | None) -> bool:
         normalized = self._normalize_token_text(value)
