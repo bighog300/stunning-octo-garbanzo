@@ -186,3 +186,14 @@ def test_route_resolution_uses_list_artists_handler_for_static_path():
             assert getattr(route, "name", None) == "list_artists"
             return
     assert False, "No route matched /api/artists"
+
+
+def test_save_artist_bio_edit_rejects_blank_bio():
+    from fastapi import HTTPException
+
+    payload = main.ArtistBioEditPayload(edited_bio="   ")
+    try:
+        main.save_artist_bio_edit("Gregory Kerr", payload)
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400

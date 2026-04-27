@@ -29,6 +29,13 @@ function getArtistProfile(artistName) {
   return api(`/api/artists/${encodeURIComponent(artistName)}`)
 }
 
+function saveArtistBio(artistName, payload) {
+  return api(`/api/artists/${encodeURIComponent(artistName)}/bio`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 function useFetch(path) {
   const [data, setData] = React.useState([])
   const [loading, setLoading] = React.useState(true)
@@ -154,14 +161,22 @@ function ArtistProfilePage() {
   const [profile, setProfile] = React.useState(null)
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState('')
+  const [editedBio, setEditedBio] = React.useState('')
+  const [saveStatus, setSaveStatus] = React.useState('')
+  const [isSaving, setIsSaving] = React.useState(false)
 
-  React.useEffect(() => {
+  const loadProfile = React.useCallback(() => {
     let mounted = true
     setLoading(true)
     setError('')
+    setSaveStatus('')
 
     getArtistProfile(artistName)
-      .then((json) => mounted && setProfile(json))
+      .then((json) => {
+        if (!mounted) return
+        setProfile(json)
+        setEditedBio(json?.artist?.artist_bio || '')
+      })
       .catch((err) => mounted && setError(err.message))
       .finally(() => mounted && setLoading(false))
 
@@ -170,18 +185,65 @@ function ArtistProfilePage() {
     }
   }, [artistName])
 
+  React.useEffect(() => loadProfile(), [loadProfile])
+
   if (loading) return <section><h2>Artist Profile</h2><p>Loading artist profile...</p></section>
   if (error) return <section><h2>Artist Profile</h2><p className="error-text">Failed to load artist profile: {error}</p></section>
   if (!profile || !profile.artist) return <section><h2>Artist Profile</h2><p>Artist not found.</p></section>
 
   const { artist, artworks = [], events = [] } = profile
   const displayName = artist.artist_name || artistName
+  const currentBio = artist.artist_bio || ''
+  const hasEditedBio = Boolean(artist.edited_artist_bio)
+
+  async function onSaveBio() {
+    setIsSaving(true)
+    setSaveStatus('')
+    try {
+      await saveArtistBio(displayName, {
+        edited_bio: editedBio,
+        edited_by: 'admin',
+        edit_notes: 'Manual edit from artist profile page',
+        source_domain: artist.source_domain || 'art.co.za',
+      })
+      setSaveStatus('Bio saved successfully.')
+      loadProfile()
+    } catch (err) {
+      setSaveStatus(`Failed to save bio: ${err.message}`)
+    } finally {
+      setIsSaving(false)
+    }
+  }
 
   return (
     <section>
       <h2>{displayName}</h2>
       <p><strong>Artwork count:</strong> {artist.artwork_count ?? artworks.length ?? 0}</p>
-      <p>{artist.artist_bio || 'No bio available'}</p>
+      {artist.original_artist_bio && (
+        <p>
+          <strong>Original bio:</strong> {artist.original_artist_bio}
+        </p>
+      )}
+      <p><strong>Current bio:</strong> {currentBio || 'No bio available'}</p>
+      {hasEditedBio && artist.bio_last_edited_at && (
+        <p>
+          <strong>Last edited:</strong> {artist.bio_last_edited_at}
+          {artist.bio_edited_by ? ` by ${artist.bio_edited_by}` : ''}
+        </p>
+      )}
+      <div className="controls">
+        <label className="field-label" htmlFor="artist-bio-edit">Edit bio</label>
+        <textarea
+          id="artist-bio-edit"
+          value={editedBio}
+          onChange={(e) => setEditedBio(e.target.value)}
+          placeholder="Write a curated artist bio"
+        />
+        <button onClick={onSaveBio} disabled={isSaving}>
+          {isSaving ? 'Saving...' : 'Save bio edit'}
+        </button>
+        {saveStatus && <p className={saveStatus.startsWith('Failed') ? 'error-text' : ''}>{saveStatus}</p>}
+      </div>
       {artist.source_url && (
         <p>
           <strong>Profile:</strong>{' '}

@@ -18,6 +18,13 @@ class ReviewActionPayload(BaseModel):
     public_visibility: bool = True
 
 
+class ArtistBioEditPayload(BaseModel):
+    edited_bio: str
+    edited_by: str | None = "artio_admin"
+    edit_notes: str | None = None
+    source_domain: str = "art.co.za"
+
+
 app = FastAPI(title="Artio API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -160,7 +167,9 @@ def list_artists(
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT artist_name, source_domain, profile_url, artist_bio, artwork_count, last_seen
+                    SELECT artist_name, source_domain, profile_url, original_artist_bio,
+                           edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
+                           bio_last_edited_at, artwork_count, last_seen
                     FROM app.artist_profiles
                     {where_sql}
                     ORDER BY artist_name ASC
@@ -209,7 +218,9 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT artist_name, source_domain, profile_url, artist_bio, artwork_count, last_seen
+                    SELECT artist_name, source_domain, profile_url, original_artist_bio,
+                           edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
+                           bio_last_edited_at, artwork_count, last_seen
                     FROM app.artist_profiles
                     WHERE artist_name = %s
                     LIMIT 1
@@ -296,6 +307,58 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         logger.exception("Failed to fetch artist profile for %s", artist_name)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/artists/{artist_name}/bio")
+def save_artist_bio_edit(artist_name: str, payload: ArtistBioEditPayload) -> dict[str, Any]:
+    if not payload.edited_bio.strip():
+        raise HTTPException(status_code=400, detail="edited_bio cannot be empty")
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM app.artist_profiles
+                    WHERE artist_name = %s
+                      AND source_domain = %s
+                    LIMIT 1
+                    """,
+                    (artist_name, payload.source_domain),
+                )
+                artist = cur.fetchone()
+                if not artist:
+                    raise HTTPException(status_code=404, detail="Artist not found")
+
+                cur.execute(
+                    """
+                    INSERT INTO app.artist_profile_edits (
+                        artist_name,
+                        source_domain,
+                        edited_bio,
+                        edited_by,
+                        edit_notes
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    RETURNING id, created_at
+                    """,
+                    (
+                        artist_name,
+                        payload.source_domain,
+                        payload.edited_bio.strip(),
+                        payload.edited_by,
+                        payload.edit_notes,
+                    ),
+                )
+                edit_row = _serialize_row(cur.fetchone())
+            conn.commit()
+        return {"status": "saved", "edit": edit_row}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to save artist bio edit for %s", artist_name)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
