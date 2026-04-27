@@ -102,7 +102,7 @@ latest_bio_edits AS (
         edited_bio,
         edited_by,
         edit_notes,
-        created_at
+        created_at AS edited_at
     FROM app.artist_profile_edits
     ORDER BY artist_name, source_domain, created_at DESC
 )
@@ -110,12 +110,15 @@ SELECT
     bp.artist_name,
     bp.source_domain,
     bp.profile_url,
-    bp.original_artist_bio,
-    lbe.edited_bio AS edited_artist_bio,
     COALESCE(lbe.edited_bio, bp.original_artist_bio) AS artist_bio,
+    bp.original_artist_bio,
+    lbe.edited_bio,
+    lbe.edited_by,
+    lbe.edited_at,
+    lbe.edited_bio AS edited_artist_bio,
     lbe.edited_by AS bio_edited_by,
     lbe.edit_notes AS bio_edit_notes,
-    lbe.created_at AS bio_last_edited_at,
+    lbe.edited_at AS bio_last_edited_at,
     bp.artwork_count,
     bp.last_seen
 FROM base_profiles bp
