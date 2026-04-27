@@ -177,6 +177,31 @@ def list_artists(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.get("/api/review-queue")
+def review_queue(limit: int = 100) -> list[dict[str, Any]]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT artwork_id, artwork_title, artist_name, image_url, source_name, source_url,
+                       medium_text, year_start, year_end, quality_score, review_status
+                FROM app.artwork_records
+                WHERE COALESCE(review_status, 'pending') = 'pending'
+                ORDER BY quality_score DESC NULLS LAST, created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+    return rows
+
+
+@app.get("/api/artworks/{artwork_id}")
+def get_artwork(artwork_id: str) -> dict[str, Any]:
+    with get_conn() as conn:
+        return _get_artwork_or_404(conn, artwork_id)
+
+
 @app.get("/api/artists/{artist_name}")
 def get_artist_profile(artist_name: str) -> dict[str, Any]:
     try:
@@ -272,31 +297,6 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("Failed to fetch artist profile for %s", artist_name)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.get("/api/artworks/{artwork_id}")
-def get_artwork(artwork_id: str) -> dict[str, Any]:
-    with get_conn() as conn:
-        return _get_artwork_or_404(conn, artwork_id)
-
-
-@app.get("/api/review-queue")
-def review_queue(limit: int = 100) -> list[dict[str, Any]]:
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT artwork_id, artwork_title, artist_name, image_url, source_name, source_url,
-                       medium_text, year_start, year_end, quality_score, review_status
-                FROM app.artwork_records
-                WHERE COALESCE(review_status, 'pending') = 'pending'
-                ORDER BY quality_score DESC NULLS LAST, created_at DESC
-                LIMIT %s
-                """,
-                (limit,),
-            )
-            rows = cur.fetchall()
-    return rows
 
 
 @app.post("/api/artworks/{artwork_id}/approve")

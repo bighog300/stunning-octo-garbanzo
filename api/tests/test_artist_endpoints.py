@@ -2,6 +2,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import api.main as main
+from starlette.routing import Match
 
 
 class FakeCursor:
@@ -129,6 +130,13 @@ def test_list_artists_with_limit_returns_200(monkeypatch):
     assert len(response) == 1
 
 
+def test_artworks_route_still_returns_data(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    response = main.list_artworks(limit=5, offset=0)
+    assert isinstance(response, list)
+    assert response[0]["artwork_id"] == "id-1"
+
+
 def test_artist_detail_not_found_returns_404(monkeypatch):
     from fastapi import HTTPException
 
@@ -151,3 +159,30 @@ def test_list_artists_serializes_datetime_values(monkeypatch):
     serialized = main._serialize_rows([{"artist_name": "A", "last_seen": dt}, DictLikeRow()])
     assert serialized[0]["last_seen"] == "2026-04-27T12:00:00+00:00"
     assert serialized[1]["last_seen"] == "2026-04-27T12:00:00+00:00"
+
+
+def test_artist_profile_route_returns_404_for_unknown_artist(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    from fastapi import HTTPException
+
+    try:
+        main.get_artist_profile("Unknown Artist")
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 404
+        assert exc.detail == "Artist not found"
+
+
+def test_route_order_keeps_static_before_dynamic_routes():
+    route_paths = [route.path for route in main.app.routes]
+    assert route_paths.index("/api/artists") < route_paths.index("/api/artists/{artist_name}")
+
+
+def test_route_resolution_uses_list_artists_handler_for_static_path():
+    scope = {"type": "http", "method": "GET", "path": "/api/artists"}
+    for route in main.app.router.routes:
+        match, _ = route.matches(scope)
+        if match == Match.FULL:
+            assert getattr(route, "name", None) == "list_artists"
+            return
+    assert False, "No route matched /api/artists"
