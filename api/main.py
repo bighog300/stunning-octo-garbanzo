@@ -803,18 +803,42 @@ def update_artist_moderation(artist_name: str, payload: ArtistModerationPayload)
             with conn.cursor() as cur:
                 cur.execute(
                     """
+                    WITH artist_candidates AS (
+                        SELECT
+                            source_domain,
+                            last_seen
+                        FROM app.artist_profiles
+                        WHERE artist_name = %s
+
+                        UNION ALL
+
+                        SELECT
+                            COALESCE(source_domain, 'art.co.za') AS source_domain,
+                            MAX(crawl_timestamp) AS last_seen
+                        FROM app.artwork_records
+                        WHERE original_artist_name = %s
+                        GROUP BY COALESCE(source_domain, 'art.co.za')
+
+                        UNION ALL
+
+                        SELECT
+                            COALESCE(source_domain, 'art.co.za') AS source_domain,
+                            MAX(crawl_timestamp) AS last_seen
+                        FROM raw.artworks
+                        WHERE artist_name = %s
+                        GROUP BY COALESCE(source_domain, 'art.co.za')
+                    )
                     SELECT source_domain
-                    FROM app.artist_profiles
-                    WHERE artist_name = %s
-                    ORDER BY last_seen DESC NULLS LAST
+                    FROM artist_candidates
+                    ORDER BY last_seen DESC NULLS LAST, source_domain ASC
                     LIMIT 1
                     """,
-                    (artist_name,),
+                    (artist_name, artist_name, artist_name),
                 )
                 artist_row = cur.fetchone()
                 if not artist_row:
                     raise HTTPException(status_code=404, detail="Artist not found")
-                source_domain = artist_row["source_domain"]
+                source_domain = artist_row["source_domain"] or "art.co.za"
 
                 cur.execute(
                     """

@@ -47,7 +47,7 @@ class FakeCursor:
                 self._row = {"id": params[1], "status": "open", "resolution_notes": params[0]}
             return
 
-        if "SELECT source_domain FROM app.artist_profiles" in sql:
+        if "WITH artist_candidates AS" in sql and "FROM app.artist_profiles" in sql:
             self._row = {"source_domain": "art.co.za"}
             return
 
@@ -155,3 +155,51 @@ def test_hidden_artist_search_behavior(monkeypatch):
     assert len(hidden_included) == 1
     assert hidden_included[0]["artist_name"] == "Latest Work"
     assert hidden_included[0]["is_hidden"] is True
+
+
+def test_canonical_filtered_artist_can_still_be_moderated(monkeypatch):
+    class CanonicalFilteredCursor(FakeCursor):
+        def execute(self, query, params=None):
+            sql = " ".join(query.split())
+            self.conn.queries.append((sql, params))
+
+            if "WITH artist_candidates AS" in sql and "FROM app.artist_profiles" in sql:
+                # Artist is no longer present in app.artist_profiles, but still exists in
+                # app.artwork_records.original_artist_name after canonical filtering.
+                self._row = {"source_domain": "art.co.za"}
+                return
+
+            if "INSERT INTO app.artist_moderation_overrides" in sql:
+                self._row = {
+                    "artist_name": params[0],
+                    "source_domain": params[1],
+                    "is_hidden": params[2],
+                    "canonical_artist_name": params[3],
+                    "reason": params[4],
+                    "updated_by": params[5],
+                }
+                return
+
+    class CanonicalFilteredConn(FakeConn):
+        def cursor(self):
+            return CanonicalFilteredCursor(self)
+
+    @contextmanager
+    def canonical_filtered_conn():
+        yield CanonicalFilteredConn()
+
+    monkeypatch.setattr(main, "get_conn", canonical_filtered_conn)
+    response = main.update_artist_moderation(
+        "Latest Work",
+        main.ArtistModerationPayload(
+            is_hidden=True,
+            canonical_artist_name="Gregory Kerr",
+            reason="Navigation label",
+            updated_by="moderator",
+        ),
+    )
+
+    assert response["status"] == "updated"
+    assert response["artist_moderation"]["artist_name"] == "Latest Work"
+    assert response["artist_moderation"]["source_domain"] == "art.co.za"
+    assert response["artist_moderation"]["is_hidden"] is True
