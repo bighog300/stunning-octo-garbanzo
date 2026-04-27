@@ -56,6 +56,18 @@ class MatchedMetrics:
     matched_quality_delta: float
 
 
+@dataclass
+class ArtistNameBackfillMetrics:
+    changed_artist_name_count: int
+    update_candidate_count: int
+    skipped_missing_source_record_id_count: int
+    skipped_source_record_id_mismatch_count: int
+    skipped_empty_after_name_count: int
+    applied: bool
+    applied_updates_count: int
+    applied_rows_affected: int
+
+
 def _safe_text(value: Any) -> str:
     if value is None:
         return ""
@@ -289,11 +301,12 @@ def build_changed_records(
 
         artist_before = _safe_text(before.get("artist_name"))
         artist_after = _safe_text(after.get("artist_name"))
+        artist_name_changed = artist_before != artist_after
         description_before = _safe_text(before.get("description"))
         description_after = _safe_text(after.get("description"))
 
         if (
-            artist_before == artist_after
+            not artist_name_changed
             and description_before == description_after
             and quality_delta == 0
         ):
@@ -304,6 +317,7 @@ def build_changed_records(
                 "source_record_id": _safe_text(after.get("source_record_id") or before.get("source_record_id")),
                 "artist_name_before": artist_before,
                 "artist_name_after": artist_after,
+                "artist_name_changed": artist_name_changed,
                 "description_before_preview": _preview(description_before),
                 "description_after_preview": _preview(description_after),
                 "quality_before": quality_before,
@@ -324,6 +338,103 @@ def build_changed_records(
     if show_changes < 0:
         return changed
     return changed[:show_changes]
+
+
+def build_artist_name_backfill_plan(
+    matched_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    show_updates: int,
+) -> tuple[ArtistNameBackfillMetrics, list[dict[str, str]]]:
+    updates: list[dict[str, str]] = []
+    changed_artist_name_count = 0
+    skipped_missing_source_record_id_count = 0
+    skipped_source_record_id_mismatch_count = 0
+    skipped_empty_after_name_count = 0
+
+    for before, after in matched_pairs:
+        artist_before = _safe_text(before.get("artist_name"))
+        artist_after = _safe_text(after.get("artist_name"))
+        if artist_before == artist_after:
+            continue
+
+        changed_artist_name_count += 1
+        source_record_id_before = _safe_text(before.get("source_record_id"))
+        source_record_id_after = _safe_text(after.get("source_record_id"))
+        if not source_record_id_before or not source_record_id_after:
+            skipped_missing_source_record_id_count += 1
+            continue
+        if source_record_id_before != source_record_id_after:
+            skipped_source_record_id_mismatch_count += 1
+            continue
+        if not artist_after:
+            skipped_empty_after_name_count += 1
+            continue
+
+        updates.append(
+            {
+                "source_record_id": source_record_id_after,
+                "artist_name_before": artist_before,
+                "artist_name_after": artist_after,
+            }
+        )
+
+    metrics = ArtistNameBackfillMetrics(
+        changed_artist_name_count=changed_artist_name_count,
+        update_candidate_count=len(updates),
+        skipped_missing_source_record_id_count=skipped_missing_source_record_id_count,
+        skipped_source_record_id_mismatch_count=skipped_source_record_id_mismatch_count,
+        skipped_empty_after_name_count=skipped_empty_after_name_count,
+        applied=False,
+        applied_updates_count=0,
+        applied_rows_affected=0,
+    )
+
+    if show_updates >= 0:
+        return metrics, updates[:show_updates]
+    return metrics, updates
+
+
+def apply_artist_name_backfill_updates(updates: list[dict[str, str]]) -> tuple[int, int]:
+    if not updates:
+        return 0, 0
+
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise RuntimeError("psycopg is required for applying artist-name backfills. Install psycopg[binary].") from exc
+
+    conn_str = " ".join(
+        f"{k}={v}"
+        for k, v in {
+            "host": os.getenv("ARTIO_POSTGRES_HOST", "localhost"),
+            "port": os.getenv("ARTIO_POSTGRES_PORT", "5432"),
+            "dbname": os.getenv("ARTIO_POSTGRES_DB", "artio"),
+            "user": os.getenv("ARTIO_POSTGRES_USER", "artio"),
+            "password": os.getenv("ARTIO_POSTGRES_PASSWORD", "artio"),
+        }.items()
+    )
+
+    rows_affected = 0
+    with psycopg.connect(conn_str) as conn:
+        with conn.cursor() as cur:
+            for update in updates:
+                cur.execute(
+                    """
+                    UPDATE raw.artworks
+                    SET artist_name = %s
+                    WHERE source_domain = 'art.co.za'
+                      AND source_record_id = %s
+                      AND COALESCE(artist_name, '') = %s
+                    """,
+                    (
+                        update["artist_name_after"],
+                        update["source_record_id"],
+                        update["artist_name_before"],
+                    ),
+                )
+                rows_affected += cur.rowcount
+        conn.commit()
+
+    return len(updates), rows_affected
 
 
 def _is_single_token(name: str) -> bool:
@@ -464,6 +575,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--matched-only", action="store_true", help="Compute baseline/recrawl stats on matched records only.")
     parser.add_argument("--show-changes", type=int, default=10, help="Number of changed matched records to show; -1 means all.")
     parser.add_argument(
+        "--show-artist-backfill-updates",
+        type=int,
+        default=20,
+        help="Number of source_record_id-based artist-name update candidates to include; -1 means all.",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Apply source_record_id-based artist-name backfill updates to raw.artworks. Defaults to dry-run report only.",
+    )
+    parser.add_argument(
         "--print-json",
         action="store_true",
         help="Print full JSON report to stdout.",
@@ -508,6 +630,15 @@ def main(argv: list[str] | None = None) -> int:
             recrawl_stats = build_stats("after", recrawl_records)
 
         changed_records = build_changed_records(matched_pairs, show_changes=args.show_changes)
+        backfill_metrics, backfill_updates = build_artist_name_backfill_plan(
+            matched_pairs,
+            show_updates=args.show_artist_backfill_updates,
+        )
+        if args.apply:
+            applied_updates_count, rows_affected = apply_artist_name_backfill_updates(backfill_updates)
+            backfill_metrics.applied = True
+            backfill_metrics.applied_updates_count = applied_updates_count
+            backfill_metrics.applied_rows_affected = rows_affected
         suspect_artist_names = build_suspect_artist_names(recrawl_records)
 
         report = {
@@ -518,6 +649,10 @@ def main(argv: list[str] | None = None) -> int:
             "matched": asdict(matched_metrics),
             "delta": _delta(baseline_stats, recrawl_stats),
             "changed_records": changed_records,
+            "artist_name_backfill": {
+                **asdict(backfill_metrics),
+                "updates": backfill_updates,
+            },
             "suspect_artist_name_count": len(suspect_artist_names),
             "suspect_artist_names": suspect_artist_names,
             "metadata": {
@@ -528,8 +663,10 @@ def main(argv: list[str] | None = None) -> int:
                 "recrawl_records_sampled": len(recrawl_records),
                 "matched_only": args.matched_only,
                 "show_changes": args.show_changes,
+                "show_artist_backfill_updates": args.show_artist_backfill_updates,
                 "recrawl": recrawl_meta,
-                "non_destructive": True,
+                "non_destructive": not args.apply,
+                "apply": args.apply,
             },
         }
 
@@ -542,7 +679,11 @@ def main(argv: list[str] | None = None) -> int:
             f"matched={matched_metrics.matched_records_total}, "
             f"matched_quality_before={matched_metrics.matched_quality_before}, "
             f"matched_quality_after={matched_metrics.matched_quality_after}, "
-            f"matched_quality_delta={matched_metrics.matched_quality_delta}"
+            f"matched_quality_delta={matched_metrics.matched_quality_delta}, "
+            f"artist_name_changed={backfill_metrics.changed_artist_name_count}, "
+            f"artist_backfill_candidates={backfill_metrics.update_candidate_count}, "
+            f"apply={args.apply}, "
+            f"rows_affected={backfill_metrics.applied_rows_affected}"
         )
         if args.print_json:
             print(json.dumps(report, indent=2))
