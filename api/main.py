@@ -34,6 +34,23 @@ class DataQualityFlagPayload(BaseModel):
     created_by: str | None = "artio_admin"
 
 
+class FlagResolvePayload(BaseModel):
+    resolved_by: str | None = "artio_admin"
+    resolution_notes: str | None = None
+
+
+class FlagReopenPayload(BaseModel):
+    reopened_by: str | None = "artio_admin"
+    notes: str | None = None
+
+
+class ArtistModerationPayload(BaseModel):
+    is_hidden: bool = False
+    canonical_artist_name: str | None = None
+    reason: str | None = None
+    updated_by: str | None = "artio_admin"
+
+
 app = FastAPI(title="Artio API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -162,6 +179,13 @@ def _safe_limit(limit: int) -> int:
     return max(1, min(limit, 500))
 
 
+def _queue_status_filter(status: str) -> str:
+    allowed = {"open", "resolved", "all"}
+    if status not in allowed:
+        raise HTTPException(status_code=400, detail="status must be open|resolved|all")
+    return status
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     with get_conn() as conn:
@@ -246,8 +270,10 @@ def moderation_queue_records(
     queue_name: str,
     limit: int = Query(default=100, ge=1),
     offset: int = Query(default=0, ge=0),
+    status: str = "open",
 ) -> list[dict[str, Any]]:
     safe_limit = _safe_limit(limit)
+    queue_status = _queue_status_filter(status)
     issue_reason = _queue_reason_sql(queue_name)
 
     artist_queue_where = {
@@ -269,15 +295,44 @@ def moderation_queue_records(
                     params: list[Any] = []
                     if queue_name == "artists-suspect-name":
                         params.extend(SUSPECT_NAME_PATTERNS)
+                    status_filter_sql = ""
+                    if queue_status == "resolved":
+                        status_filter_sql = (
+                            "AND EXISTS (SELECT 1 FROM app.data_quality_flags dqr "
+                            "WHERE dqr.entity_type = 'artist' AND dqr.artist_name = ap.artist_name "
+                            "AND dqr.issue_type = "
+                            + issue_reason
+                            + " AND dqr.status = 'resolved')"
+                        )
+                    elif queue_status == "open":
+                        status_filter_sql = (
+                            "AND NOT EXISTS (SELECT 1 FROM app.data_quality_flags dqo "
+                            "WHERE dqo.entity_type = 'artist' AND dqo.artist_name = ap.artist_name "
+                            "AND dqo.issue_type = "
+                            + issue_reason
+                            + " AND dqo.status = 'resolved')"
+                        )
                     params.extend([safe_limit, offset])
                     cur.execute(
                         f"""
-                        SELECT artist_name, source_domain, profile_url, artist_bio, original_artist_bio,
-                               edited_artist_bio AS edited_bio, bio_edited_by AS edited_by,
-                               bio_last_edited_at AS edited_at, artwork_count, last_seen,
+                        SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.artist_bio, ap.original_artist_bio,
+                               ap.edited_artist_bio AS edited_bio, ap.bio_edited_by AS edited_by,
+                               ap.bio_last_edited_at AS edited_at, ap.artwork_count, ap.last_seen,
+                               COALESCE(dq.open_flags_count, 0) AS open_flags_count,
+                               COALESCE(amo.is_hidden, false) AS is_hidden,
+                               amo.canonical_artist_name,
                                {issue_reason} AS issue_reason
-                        FROM app.artist_profiles
+                        FROM app.artist_profiles ap
+                        LEFT JOIN (
+                          SELECT artist_name, issue_type, COUNT(*) AS open_flags_count
+                          FROM app.data_quality_flags
+                          WHERE status = 'open'
+                          GROUP BY artist_name, issue_type
+                        ) dq ON dq.artist_name = ap.artist_name AND dq.issue_type = {issue_reason}
+                        LEFT JOIN app.artist_moderation_overrides amo
+                          ON amo.artist_name = ap.artist_name AND amo.source_domain = ap.source_domain
                         WHERE {artist_queue_where[queue_name]}
+                        {status_filter_sql}
                         ORDER BY last_seen DESC NULLS LAST, artist_name ASC
                         LIMIT %s OFFSET %s
                         """,
@@ -288,18 +343,48 @@ def moderation_queue_records(
                 if queue_name == "artists-without-events":
                     if not _relation_exists(conn, "app", "artist_event_links"):
                         return []
+                    status_filter_sql = ""
+                    if queue_status == "resolved":
+                        status_filter_sql = (
+                            "AND EXISTS (SELECT 1 FROM app.data_quality_flags dqr "
+                            "WHERE dqr.entity_type = 'artist' AND dqr.artist_name = ap.artist_name "
+                            "AND dqr.issue_type = "
+                            + issue_reason
+                            + " AND dqr.status = 'resolved')"
+                        )
+                    elif queue_status == "open":
+                        status_filter_sql = (
+                            "AND NOT EXISTS (SELECT 1 FROM app.data_quality_flags dqo "
+                            "WHERE dqo.entity_type = 'artist' AND dqo.artist_name = ap.artist_name "
+                            "AND dqo.issue_type = "
+                            + issue_reason
+                            + " AND dqo.status = 'resolved')"
+                        )
                     cur.execute(
                         f"""
                         SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.artist_bio,
                                ap.original_artist_bio, ap.edited_artist_bio AS edited_bio,
                                ap.bio_edited_by AS edited_by, ap.bio_last_edited_at AS edited_at,
-                               ap.artwork_count, ap.last_seen, {issue_reason} AS issue_reason
+                               ap.artwork_count, ap.last_seen,
+                               COALESCE(dq.open_flags_count, 0) AS open_flags_count,
+                               COALESCE(amo.is_hidden, false) AS is_hidden,
+                               amo.canonical_artist_name,
+                               {issue_reason} AS issue_reason
                         FROM app.artist_profiles ap
+                        LEFT JOIN (
+                          SELECT artist_name, issue_type, COUNT(*) AS open_flags_count
+                          FROM app.data_quality_flags
+                          WHERE status = 'open'
+                          GROUP BY artist_name, issue_type
+                        ) dq ON dq.artist_name = ap.artist_name AND dq.issue_type = {issue_reason}
+                        LEFT JOIN app.artist_moderation_overrides amo
+                          ON amo.artist_name = ap.artist_name AND amo.source_domain = ap.source_domain
                         WHERE NOT EXISTS (
                           SELECT 1
                           FROM app.artist_event_links ael
                           WHERE ael.artist_name = ap.artist_name
                         )
+                        {status_filter_sql}
                         ORDER BY ap.last_seen DESC NULLS LAST, ap.artist_name ASC
                         LIMIT %s OFFSET %s
                         """,
@@ -308,14 +393,25 @@ def moderation_queue_records(
                     return _serialize_rows(cur.fetchall())
 
                 if queue_name == "artworks-pending-review":
+                    where_sql = "COALESCE(ar.review_status, 'pending') = 'pending'"
+                    if queue_status == "resolved":
+                        where_sql = "COALESCE(ar.review_status, 'pending') <> 'pending'"
                     cur.execute(
                         f"""
-                        SELECT artwork_id, artwork_title, artist_name, image_url, source_url,
-                               review_status, public_visibility, quality_score,
+                        SELECT ar.artwork_id, ar.artwork_title, ar.artist_name, ar.image_url, ar.source_url,
+                               ar.review_status, ar.public_visibility, ar.quality_score,
+                               rr.rejection_reason,
                                {issue_reason} AS issue_reason
-                        FROM app.artwork_records
-                        WHERE COALESCE(review_status, 'pending') = 'pending'
-                        ORDER BY created_at DESC
+                        FROM app.artwork_records ar
+                        LEFT JOIN LATERAL (
+                          SELECT rejection_reason
+                          FROM app.rejected_artworks r
+                          WHERE r.artwork_id = ar.artwork_id::uuid
+                          ORDER BY r.rejected_at DESC
+                          LIMIT 1
+                        ) rr ON true
+                        WHERE {where_sql}
+                        ORDER BY ar.created_at DESC
                         LIMIT %s OFFSET %s
                         """,
                         (safe_limit, offset),
@@ -323,14 +419,28 @@ def moderation_queue_records(
                     return _serialize_rows(cur.fetchall())
 
                 if queue_name == "broken-or-missing-images":
+                    review_sql = ""
+                    if queue_status == "open":
+                        review_sql = "AND COALESCE(ar.review_status, 'pending') = 'pending'"
+                    elif queue_status == "resolved":
+                        review_sql = "AND COALESCE(ar.review_status, 'pending') <> 'pending'"
                     cur.execute(
                         f"""
-                        SELECT artwork_id, artwork_title, artist_name, image_url, source_url,
-                               review_status, public_visibility, quality_score,
+                        SELECT ar.artwork_id, ar.artwork_title, ar.artist_name, ar.image_url, ar.source_url,
+                               ar.review_status, ar.public_visibility, ar.quality_score,
+                               rr.rejection_reason,
                                {issue_reason} AS issue_reason
-                        FROM app.artwork_records
-                        WHERE image_url IS NULL OR btrim(image_url) = ''
-                        ORDER BY created_at DESC
+                        FROM app.artwork_records ar
+                        LEFT JOIN LATERAL (
+                          SELECT rejection_reason
+                          FROM app.rejected_artworks r
+                          WHERE r.artwork_id = ar.artwork_id::uuid
+                          ORDER BY r.rejected_at DESC
+                          LIMIT 1
+                        ) rr ON true
+                        WHERE (ar.image_url IS NULL OR btrim(ar.image_url) = '')
+                        {review_sql}
+                        ORDER BY ar.created_at DESC
                         LIMIT %s OFFSET %s
                         """,
                         (safe_limit, offset),
@@ -360,28 +470,12 @@ def create_data_quality_flag(payload: DataQualityFlagPayload) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS app.data_quality_flags (
-                      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                      entity_type text NOT NULL,
-                      entity_id text,
-                      artist_name text,
-                      issue_type text NOT NULL,
-                      notes text,
-                      status text NOT NULL DEFAULT 'open',
-                      created_by text,
-                      created_at timestamptz DEFAULT now(),
-                      resolved_at timestamptz
-                    )
-                    """
-                )
-                cur.execute(
-                    """
                     INSERT INTO app.data_quality_flags (
                       entity_type, entity_id, artist_name, issue_type, notes, created_by
                     )
                     VALUES (%s, %s, %s, %s, %s, %s)
                     RETURNING id, entity_type, entity_id, artist_name, issue_type, notes,
-                              status, created_by, created_at, resolved_at
+                              status, created_by, created_at, resolved_by, resolved_at, resolution_notes
                     """,
                     (
                         payload.entity_type,
@@ -400,6 +494,102 @@ def create_data_quality_flag(payload: DataQualityFlagPayload) -> dict[str, Any]:
     except Exception as exc:
         logger.exception("Failed to create data quality flag")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/moderation/flags")
+def list_data_quality_flags(
+    status: str = Query(default="open"),
+    entity_type: str | None = None,
+    artist_name: str | None = None,
+    issue_type: str | None = None,
+    limit: int = Query(default=100, ge=1),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    safe_limit = _safe_limit(limit)
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    if status != "all":
+        if status not in {"open", "resolved"}:
+            raise HTTPException(status_code=400, detail="status must be open|resolved|all")
+        where_clauses.append("status = %s")
+        params.append(status)
+    if entity_type:
+        where_clauses.append("entity_type = %s")
+        params.append(entity_type)
+    if artist_name:
+        where_clauses.append("artist_name ILIKE %s")
+        params.append(f"%{artist_name}%")
+    if issue_type:
+        where_clauses.append("issue_type = %s")
+        params.append(issue_type)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.extend([safe_limit, offset])
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT id, entity_type, entity_id, artist_name, issue_type, notes, status,
+                       created_by, created_at, resolved_by, resolved_at, resolution_notes
+                FROM app.data_quality_flags
+                {where_sql}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+    return _serialize_rows(rows)
+
+
+@app.post("/api/moderation/flags/{flag_id}/resolve")
+def resolve_data_quality_flag(flag_id: str, payload: FlagResolvePayload) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE app.data_quality_flags
+                SET status = 'resolved',
+                    resolved_at = now(),
+                    resolved_by = %s,
+                    resolution_notes = %s
+                WHERE id = %s::uuid
+                RETURNING id, entity_type, entity_id, artist_name, issue_type, notes, status,
+                          created_by, created_at, resolved_by, resolved_at, resolution_notes
+                """,
+                (payload.resolved_by, payload.resolution_notes, flag_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Flag not found")
+        conn.commit()
+    return {"status": "resolved", "flag": _serialize_row(row)}
+
+
+@app.post("/api/moderation/flags/{flag_id}/reopen")
+def reopen_data_quality_flag(flag_id: str, payload: FlagReopenPayload) -> dict[str, Any]:
+    reopen_note = payload.notes.strip() if payload.notes else None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE app.data_quality_flags
+                SET status = 'open',
+                    resolved_at = NULL,
+                    resolved_by = NULL,
+                    resolution_notes = %s
+                WHERE id = %s::uuid
+                RETURNING id, entity_type, entity_id, artist_name, issue_type, notes, status,
+                          created_by, created_at, resolved_by, resolved_at, resolution_notes
+                """,
+                (reopen_note, flag_id),
+            )
+            row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Flag not found")
+        conn.commit()
+    return {"status": "open", "flag": _serialize_row(row)}
 
 
 @app.get("/api/artworks")
@@ -426,17 +616,20 @@ def list_artists(
     offset: int = Query(default=0, ge=0),
     search: str | None = None,
     source_domain: str | None = None,
+    include_hidden: bool = False,
 ) -> list[dict[str, Any]]:
     safe_limit = max(1, min(limit, 500))
     where_clauses: list[str] = []
     params: list[Any] = []
 
     if search:
-        where_clauses.append("artist_name ILIKE %s")
+        where_clauses.append("ap.artist_name ILIKE %s")
         params.append(f"%{search}%")
     if source_domain:
-        where_clauses.append("source_domain = %s")
+        where_clauses.append("ap.source_domain = %s")
         params.append(source_domain)
+    if not include_hidden:
+        where_clauses.append("COALESCE(amo.is_hidden, false) = false")
 
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     params.extend([safe_limit, offset])
@@ -448,10 +641,17 @@ def list_artists(
                     f"""
                     SELECT artist_name, source_domain, profile_url, original_artist_bio,
                            edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
-                           bio_last_edited_at, artwork_count, last_seen
-                    FROM app.artist_profiles
+                           bio_last_edited_at, artwork_count, last_seen,
+                           COALESCE(amo.is_hidden, false) AS is_hidden,
+                           amo.canonical_artist_name,
+                           amo.reason AS moderation_reason,
+                           amo.updated_by AS moderation_updated_by,
+                           amo.updated_at AS moderation_updated_at
+                    FROM app.artist_profiles ap
+                    LEFT JOIN app.artist_moderation_overrides amo
+                      ON amo.artist_name = ap.artist_name AND amo.source_domain = ap.source_domain
                     {where_sql}
-                    ORDER BY artist_name ASC
+                    ORDER BY ap.artist_name ASC
                     LIMIT %s OFFSET %s
                     """,
                     tuple(params),
@@ -499,9 +699,16 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
                     """
                     SELECT artist_name, source_domain, profile_url, original_artist_bio,
                            edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
-                           bio_last_edited_at, artwork_count, last_seen
-                    FROM app.artist_profiles
-                    WHERE artist_name = %s
+                           bio_last_edited_at, artwork_count, last_seen,
+                           COALESCE(amo.is_hidden, false) AS is_hidden,
+                           amo.canonical_artist_name,
+                           amo.reason AS moderation_reason,
+                           amo.updated_by AS moderation_updated_by,
+                           amo.updated_at AS moderation_updated_at
+                    FROM app.artist_profiles ap
+                    LEFT JOIN app.artist_moderation_overrides amo
+                      ON amo.artist_name = ap.artist_name AND amo.source_domain = ap.source_domain
+                    WHERE ap.artist_name = %s
                     LIMIT 1
                     """,
                     (artist_name,),
@@ -586,6 +793,61 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         logger.exception("Failed to fetch artist profile for %s", artist_name)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/artists/{artist_name}/moderation")
+def update_artist_moderation(artist_name: str, payload: ArtistModerationPayload) -> dict[str, Any]:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT source_domain
+                    FROM app.artist_profiles
+                    WHERE artist_name = %s
+                    ORDER BY last_seen DESC NULLS LAST
+                    LIMIT 1
+                    """,
+                    (artist_name,),
+                )
+                artist_row = cur.fetchone()
+                if not artist_row:
+                    raise HTTPException(status_code=404, detail="Artist not found")
+                source_domain = artist_row["source_domain"]
+
+                cur.execute(
+                    """
+                    INSERT INTO app.artist_moderation_overrides (
+                      artist_name, source_domain, is_hidden, canonical_artist_name, reason, updated_by, updated_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, now())
+                    ON CONFLICT (artist_name, source_domain)
+                    DO UPDATE SET
+                      is_hidden = EXCLUDED.is_hidden,
+                      canonical_artist_name = EXCLUDED.canonical_artist_name,
+                      reason = EXCLUDED.reason,
+                      updated_by = EXCLUDED.updated_by,
+                      updated_at = now()
+                    RETURNING id, artist_name, source_domain, is_hidden, canonical_artist_name,
+                              reason, updated_by, updated_at
+                    """,
+                    (
+                        artist_name,
+                        source_domain,
+                        payload.is_hidden,
+                        payload.canonical_artist_name,
+                        payload.reason,
+                        payload.updated_by,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return {"status": "updated", "artist_moderation": _serialize_row(row)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to update artist moderation for %s", artist_name)
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

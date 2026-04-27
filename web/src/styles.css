@@ -94,3 +94,41 @@ button { width: fit-content; padding: 8px 12px; }
   gap: 6px;
   margin-top: 8px;
 }
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+
+.moderation-warning {
+  background: #fff4e5;
+  color: #8a4b00;
+  border: 1px solid #ffd8a8;
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.flag-status {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.hidden-badge,
+.resolved-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+}
+
+.hidden-badge {
+  background: #ebeff8;
+  color: #30456f;
+}
+
+.resolved-badge {
+  background: #e8f5e9;
+  color: #1e6e39;
+}
