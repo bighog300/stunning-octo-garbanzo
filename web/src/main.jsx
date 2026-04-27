@@ -1,6 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router-dom'
+import { BrowserRouter, Link, Route, Routes, useParams, useSearchParams } from 'react-router-dom'
 import './styles.css'
 
 async function api(path, options = {}) {
@@ -36,6 +36,22 @@ function saveArtistBio(artistName, payload) {
   })
 }
 
+function getModerationSummary() {
+  return api('/api/moderation/queues')
+}
+
+function getModerationQueue(queueName, { limit = 100, offset = 0 } = {}) {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return api(`/api/moderation/queue/${encodeURIComponent(queueName)}?${params.toString()}`)
+}
+
+function createDataQualityFlag(payload) {
+  return api('/api/moderation/flags', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 function useFetch(path) {
   const [data, setData] = React.useState([])
   const [loading, setLoading] = React.useState(true)
@@ -62,7 +78,7 @@ function Nav() {
     <nav>
       <Link to="/">Artworks</Link>
       <Link to="/artists">Artists</Link>
-      <Link to="/review-queue">Review Queue</Link>
+      <Link to="/moderation">Moderation</Link>
     </nav>
   )
 }
@@ -315,6 +331,156 @@ function ReviewQueuePage() {
   return <section><h2>Review Queue</h2>{loading ? 'Loading...' : error || <ArtworkTable rows={data} />}</section>
 }
 
+const MODERATION_QUEUE_CONFIG = {
+  'artworks-pending-review': { title: 'Pending artwork review', summaryKey: 'artworks_pending_review', issueType: 'pending_review', type: 'artwork' },
+  'artists-missing-bio': { title: 'Missing bios', summaryKey: 'artists_missing_bio', issueType: 'missing_bio', type: 'artist' },
+  'artists-short-bio': { title: 'Short bios', summaryKey: 'artists_short_bio', issueType: 'short_bio', type: 'artist' },
+  'artists-suspect-name': { title: 'Suspect artist names', summaryKey: 'artists_suspect_name', issueType: 'suspect_artist_name', type: 'artist' },
+  'artists-with-manual-bio': { title: 'Manual bio overrides', summaryKey: 'artists_with_manual_bio', issueType: 'manual_bio_override', type: 'artist' },
+  'artists-without-events': { title: 'Artists without events', summaryKey: 'artists_without_events', issueType: 'missing_events', type: 'artist' },
+  'broken-or-missing-images': { title: 'Broken/missing images', summaryKey: 'broken_or_missing_images', issueType: 'broken_or_missing_image', type: 'artwork' },
+}
+
+function ModerationFlagForm({ item, queueName }) {
+  const [isOpen, setIsOpen] = React.useState(false)
+  const [notes, setNotes] = React.useState('')
+  const [status, setStatus] = React.useState('')
+  const [isSaving, setIsSaving] = React.useState(false)
+
+  async function submitFlag() {
+    setIsSaving(true)
+    setStatus('')
+    try {
+      const config = MODERATION_QUEUE_CONFIG[queueName]
+      await createDataQualityFlag({
+        entity_type: config?.type || 'artist',
+        entity_id: item.artwork_id || null,
+        artist_name: item.artist_name || null,
+        issue_type: config?.issueType || 'data_quality_issue',
+        notes: notes.trim() || null,
+        created_by: 'admin',
+      })
+      setStatus('Flag submitted.')
+      setNotes('')
+    } catch (err) {
+      setStatus(`Failed to submit flag: ${err.message}`)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  return (
+    <div className="flag-form">
+      <button onClick={() => setIsOpen((v) => !v)}>{isOpen ? 'Close flag form' : 'Flag issue'}</button>
+      {isOpen && (
+        <>
+          <textarea
+            placeholder="Describe the issue"
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+          />
+          <button onClick={submitFlag} disabled={isSaving}>{isSaving ? 'Submitting...' : 'Submit flag'}</button>
+          {status && <p className={status.startsWith('Failed') ? 'error-text' : ''}>{status}</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
+function ModerationQueueList({ queueName, items }) {
+  const config = MODERATION_QUEUE_CONFIG[queueName]
+  if (!config) return <p className="error-text">Unknown queue.</p>
+  if (items.length === 0) return <p>No records in this queue.</p>
+
+  return (
+    <div className="queue-list">
+      {items.map((item, idx) => (
+        <article className="queue-item" key={`${item.artwork_id || item.artist_name || idx}-${idx}`}>
+          <p><span className="issue-badge">{item.issue_reason || config.issueType}</span></p>
+          {config.type === 'artist' ? (
+            <>
+              <h3><Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>{item.artist_name || 'Unknown artist'}</Link></h3>
+              <p><strong>Artworks:</strong> {item.artwork_count ?? 0}</p>
+              <p>{item.artist_bio ? `${item.artist_bio.slice(0, 220)}${item.artist_bio.length > 220 ? '...' : ''}` : 'No bio available'}</p>
+              {item.edited_bio && <p><strong>Manual bio set.</strong> {item.edited_by ? `By ${item.edited_by}` : ''} {item.edited_at || ''}</p>}
+              {item.profile_url && <p><a href={item.profile_url} target="_blank" rel="noreferrer">Profile source</a></p>}
+              <p><Link to={`/artists/${encodeURIComponent(item.artist_name)}`}>Open artist</Link></p>
+            </>
+          ) : (
+            <>
+              {item.image_url ? <img src={item.image_url} alt={item.artwork_title || 'Artwork'} /> : <div className="image-fallback">No image</div>}
+              <h3>{item.artwork_title || 'Untitled artwork'}</h3>
+              <p><strong>Artist:</strong> <Link to={`/artists/${encodeURIComponent(item.artist_name || '')}`}>{item.artist_name || 'Unknown artist'}</Link></p>
+              <p><strong>Status:</strong> {item.review_status || 'pending'}</p>
+              {item.source_url && <p><a href={item.source_url} target="_blank" rel="noreferrer">Source URL</a></p>}
+              {item.artwork_id && <p><Link to={`/artworks/${item.artwork_id}`}>Open artwork</Link></p>}
+            </>
+          )}
+          <ModerationFlagForm item={item} queueName={queueName} />
+        </article>
+      ))}
+    </div>
+  )
+}
+
+function ModerationPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [summary, setSummary] = React.useState({})
+  const [records, setRecords] = React.useState([])
+  const [loadingSummary, setLoadingSummary] = React.useState(true)
+  const [loadingQueue, setLoadingQueue] = React.useState(false)
+  const [error, setError] = React.useState('')
+  const selectedQueue = searchParams.get('queue') || ''
+
+  React.useEffect(() => {
+    let mounted = true
+    setLoadingSummary(true)
+    getModerationSummary()
+      .then((json) => mounted && setSummary(json || {}))
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoadingSummary(false))
+    return () => { mounted = false }
+  }, [])
+
+  React.useEffect(() => {
+    if (!selectedQueue) {
+      setRecords([])
+      return
+    }
+    let mounted = true
+    setLoadingQueue(true)
+    setError('')
+    getModerationQueue(selectedQueue, { limit: 100, offset: 0 })
+      .then((json) => mounted && setRecords(Array.isArray(json) ? json : []))
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoadingQueue(false))
+    return () => { mounted = false }
+  }, [selectedQueue])
+
+  return (
+    <section>
+      <h2>Moderation</h2>
+      {loadingSummary && <p>Loading moderation queues...</p>}
+      {error && <p className="error-text">Failed to load moderation data: {error}</p>}
+      <div className="moderation-grid">
+        {Object.entries(MODERATION_QUEUE_CONFIG).map(([queueName, config]) => (
+          <article className="moderation-card" key={queueName}>
+            <h3>{config.title}</h3>
+            <p>{summary?.[config.summaryKey] ?? 0}</p>
+            <button onClick={() => setSearchParams({ queue: queueName })}>Open queue</button>
+          </article>
+        ))}
+      </div>
+      {selectedQueue && (
+        <>
+          <h3>{MODERATION_QUEUE_CONFIG[selectedQueue]?.title || selectedQueue}</h3>
+          {loadingQueue ? <p>Loading queue records...</p> : <ModerationQueueList queueName={selectedQueue} items={records} />}
+        </>
+      )}
+    </section>
+  )
+}
+
 function ArtworkDetailPage() {
   const { artworkId } = useParams()
   const [artwork, setArtwork] = React.useState(null)
@@ -368,7 +534,7 @@ function App() {
         <Route path="/" element={<ArtworkListPage />} />
         <Route path="/artists" element={<ArtistListPage />} />
         <Route path="/artists/:artistName" element={<ArtistProfilePage />} />
-        <Route path="/review-queue" element={<ReviewQueuePage />} />
+        <Route path="/moderation" element={<ModerationPage />} />
         <Route path="/artworks/:artworkId" element={<ArtworkDetailPage />} />
       </Routes>
     </div>
