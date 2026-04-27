@@ -456,3 +456,63 @@ def test_source_record_id_uses_sha1_when_image_filename_missing() -> None:
     source_record_id = spider._build_source_record_id("jane-doe", image_url)
 
     assert source_record_id == f"art.co.za:jane-doe:{hashlib.sha1(image_url.encode('utf-8')).hexdigest()}"
+
+
+def test_artist_bio_extracted_from_main_container_and_excludes_sidebar_junk() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/alex-smith/",
+        """
+        <html><body>
+          <h1>Alex Smith</h1>
+          <aside class="social-sidebar">
+            <p>Follow Alex Smith on Facebook and Instagram</p>
+          </aside>
+          <main id="artist-content">
+            <div class="profile-wrap">
+              <p>Alex Smith is a Johannesburg-based visual artist focused on abstraction and memory.</p>
+              <p>He has exhibited widely across South Africa and Europe.</p>
+            </div>
+          </main>
+          <img src="/alex-smith/work-1.jpg" alt="Evening Field" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+
+    assert items
+    assert "Johannesburg-based visual artist" in items[0]["description"]
+    assert "Follow Alex Smith" not in items[0]["description"]
+    assert spider.artists_with_bio == 1
+    assert spider.artists_without_bio == 0
+
+
+def test_artist_bio_extracted_from_text_adjacent_to_gallery_layout() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/lina-mokoena/",
+        """
+        <html><body>
+          <h1>Lina Mokoena</h1>
+          <div class="intro">
+            <p>Lina Mokoena works with mixed media, stitching personal archives into painted surfaces.</p>
+          </div>
+          <div id="artwork-gallery">
+            <img src="/lina-mokoena/work-a.jpg" alt="Work A" />
+          </div>
+          <div class="after-gallery">
+            <p>Her process investigates place, ancestry, and memory through layered material gestures.</p>
+          </div>
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+
+    assert items
+    assert "mixed media" in items[0]["description"]
+    assert "layered material gestures" in items[0]["description"]
+    assert len(items[0]["raw_payload"]["profile_text_blocks"]) >= 1

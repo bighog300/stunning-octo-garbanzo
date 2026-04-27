@@ -104,6 +104,28 @@ class ArtCoZaSpider(scrapy.Spider):
         "instagram",
         "twitter",
     )
+    PROFILE_CONTAINER_HINTS = (
+        "main",
+        "content",
+        "profile",
+        "artist",
+        "about",
+        "bio",
+        "biography",
+        "statement",
+        "cv",
+    )
+    JUNK_CONTAINER_HINTS = (
+        "nav",
+        "menu",
+        "footer",
+        "sidebar",
+        "social",
+        "share",
+        "cookie",
+        "newsletter",
+        "breadcrumb",
+    )
 
     def __init__(
         self,
@@ -148,6 +170,8 @@ class ArtCoZaSpider(scrapy.Spider):
         self.images_seen_per_artist: dict[str, int] = {}
         self.images_kept_per_artist: dict[str, int] = {}
         self.images_skipped_per_artist: dict[str, int] = {}
+        self.artists_with_bio = 0
+        self.artists_without_bio = 0
 
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
@@ -199,6 +223,10 @@ class ArtCoZaSpider(scrapy.Spider):
 
         artist_profile_url = response.url
         profile_context = self._extract_artist_profile_context(response, artist_name, artist_profile_url)
+        if profile_context.get("artist_bio"):
+            self.artists_with_bio += 1
+        else:
+            self.artists_without_bio += 1
         per_artist_count = 0
 
         for item in self._extract_profile_artwork_items(response, artist_name, artist_profile_url, profile_context):
@@ -235,10 +263,12 @@ class ArtCoZaSpider(scrapy.Spider):
             skipped_before=0,
         )
         self.logger.info(
-            "Artist processed: url=%s name=%s records=%d",
+            "Artist processed: url=%s name=%s records=%d artist_bio_len=%d profile_text_blocks=%d",
             artist_profile_url,
             artist_name,
             self.records_per_artist[artist_profile_url],
+            len(profile_context.get("artist_bio") or ""),
+            len(profile_context.get("profile_text_blocks") or []),
         )
 
     def parse_artwork_section(self, response: scrapy.http.Response):
@@ -580,9 +610,26 @@ class ArtCoZaSpider(scrapy.Spider):
         artist_name: str | None,
         artist_profile_url: str | None,
     ) -> dict:
-        del artist_name
         blocks: list[str] = []
         section_statement: str | None = None
+        artist_name_tokens = self._normalize_token_text(artist_name)
+
+        def add_candidate_block(text: str | None) -> None:
+            cleaned = self._clean_profile_text(text)
+            if not cleaned:
+                return
+            if self._is_junk_profile_text_block(cleaned):
+                return
+            if self._is_probably_junk_container_text(cleaned):
+                return
+            if artist_name_tokens and artist_name_tokens not in self._normalize_token_text(cleaned):
+                # Keep artist-relevant text even when full name is not present if text looks biography-like.
+                lowered = cleaned.lower()
+                if not any(keyword in lowered for keyword in self.PROFILE_SECTION_KEYWORDS):
+                    if len(cleaned.split()) < 10:
+                        return
+            blocks.append(cleaned)
+
         for heading in response.xpath("//h1|//h2|//h3|//h4|//strong"):
             heading_text = self._normalize_whitespace(" ".join(heading.xpath(".//text()").getall()))
             lowered_heading = heading_text.lower()
@@ -597,18 +644,40 @@ class ArtCoZaSpider(scrapy.Spider):
                     section_parts.append(sibling_text)
             block_text = self._clean_profile_text("\n\n".join(section_parts))
             if block_text:
-                blocks.append(block_text)
+                add_candidate_block(block_text)
                 if "artist statement" in lowered_heading and not section_statement:
                     section_statement = block_text
 
+        for container in response.xpath(self._profile_container_xpath()):
+            paragraph_text = " ".join(
+                container.xpath(
+                    ".//*[self::p or self::div or self::section][not(ancestor::nav) and not(ancestor::footer) and not(ancestor::aside)]//text()"
+                ).getall()
+            )
+            add_candidate_block(paragraph_text)
+
+        text_near_heading = response.xpath(
+            "//h1[1]/following-sibling::*[position()<=8][not(self::nav) and not(self::footer) and not(self::aside)]//text()"
+            " | //h1[1]/preceding-sibling::*[position()<=5][not(self::nav) and not(self::footer) and not(self::aside)]//text()"
+        ).getall()
+        add_candidate_block(" ".join(text_near_heading))
+
+        gallery_adjacent_text = response.xpath(
+            "//*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
+            "contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
+            "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
+            "/preceding-sibling::*[self::p or self::div][position()<=4]//text()"
+            " | //*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
+            "contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
+            "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
+            "/following-sibling::*[self::p or self::div][position()<=4]//text()"
+        ).getall()
+        add_candidate_block(" ".join(gallery_adjacent_text))
+
         if not blocks:
-            fallback_candidates = response.xpath(
-                "//main//p//text() | //article//p//text() | //div[contains(@class,'profile')]//p//text() | //div[contains(@class,'bio')]//p//text()"
-            ).getall()
+            fallback_candidates = response.xpath("//main//p//text() | //article//p//text() | //body//p//text()").getall()
             for value in fallback_candidates:
-                cleaned = self._clean_profile_text(value)
-                if cleaned and not self._is_junk_profile_text_block(cleaned):
-                    blocks.append(cleaned)
+                add_candidate_block(value)
 
         deduped_blocks = list(dict.fromkeys(blocks))
         artist_bio = "\n\n".join(deduped_blocks) if deduped_blocks else None
@@ -621,7 +690,7 @@ class ArtCoZaSpider(scrapy.Spider):
 
     def closed(self, reason: str):
         self.logger.info(
-            "Crawl summary: reason=%s artists_visited=%d artwork_records=%d emitted=%d candidates=%d filtered=%d skipped=%d skipped_invalid_source_url=%d skipped_placeholder_image=%d skipped_invalid_artist_page=%d",
+            "Crawl summary: reason=%s artists_visited=%d artwork_records=%d emitted=%d candidates=%d filtered=%d skipped=%d skipped_invalid_source_url=%d skipped_placeholder_image=%d skipped_invalid_artist_page=%d artists_with_bio=%d artists_without_bio=%d",
             reason,
             self.artists_seen,
             self.records_seen,
@@ -632,6 +701,8 @@ class ArtCoZaSpider(scrapy.Spider):
             self.skipped_invalid_source_url,
             self.skipped_placeholder_image,
             self.skipped_invalid_artist_page,
+            self.artists_with_bio,
+            self.artists_without_bio,
         )
 
     @staticmethod
@@ -742,6 +813,38 @@ class ArtCoZaSpider(scrapy.Spider):
         if not normalized or len(normalized) < 20:
             return True
         return any(self._normalize_token_text(token) in normalized for token in self.PROFILE_TEXT_JUNK_TOKENS)
+
+    def _profile_container_xpath(self) -> str:
+        hints = " or ".join(
+            [
+                f"contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{hint}')"
+                f" or contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{hint}')"
+                for hint in self.PROFILE_CONTAINER_HINTS
+            ]
+        )
+        junk_hints = " or ".join(
+            [
+                f"contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{hint}')"
+                f" or contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), '{hint}')"
+                for hint in self.JUNK_CONTAINER_HINTS
+            ]
+        )
+        valid_predicate = f"not({junk_hints}) and not(ancestor::nav) and not(ancestor::footer) and not(ancestor::aside)"
+        return (
+            f"//main[{valid_predicate}]"
+            f" | //article[{valid_predicate}]"
+            f" | //section[({hints}) and {valid_predicate}]"
+            f" | //div[({hints}) and {valid_predicate}]"
+            f" | //td[({hints}) and {valid_predicate}]"
+        )
+
+    def _is_probably_junk_container_text(self, value: str) -> bool:
+        lowered = value.lower()
+        if any(hint in lowered for hint in self.JUNK_CONTAINER_HINTS):
+            return True
+        if "follow" in lowered and "facebook" in lowered:
+            return True
+        return False
 
     def _contains_non_artwork_token(self, value: str | None) -> bool:
         normalized = self._normalize_token_text(value)
