@@ -167,6 +167,22 @@ You can also reuse a pre-generated crawl export:
 python -m artio_cli.audit_artcoza_extraction --recrawl-jsonl /path/to/artcoza.jsonl
 ```
 
+When running the audit inside Docker, the `api` service now includes `artio_cli` on
+`PYTHONPATH=/opt/artio`:
+
+```bash
+docker compose up -d --build api
+docker compose exec api python -m artio_cli.audit_artcoza_extraction --help
+```
+
+If you need to pass crawler output between `scrapy` and `api`, use the shared host-mounted
+folder `./reports/tmp` (mounted at `/opt/artio/reports/tmp` in both containers):
+
+```bash
+docker compose exec scrapy cp /tmp/artcoza_artworks_new.json /opt/artio/reports/tmp/artcoza_artworks_new.json
+docker compose exec api python -m artio_cli.audit_artcoza_extraction --recrawl-jsonl /opt/artio/reports/tmp/artcoza_artworks_new.json
+```
+
 ## Artio moderation CLI
 
 Use the local CLI to run and validate the moderation API + web UI:

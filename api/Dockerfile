@@ -1,11 +1,14 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+WORKDIR /opt/artio
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY api/requirements.txt /opt/artio/api/requirements.txt
+RUN pip install --no-cache-dir -r /opt/artio/api/requirements.txt
 
-COPY . .
+COPY api /opt/artio/api
+COPY artio_cli /opt/artio/artio_cli
+
+WORKDIR /opt/artio/api
 
 EXPOSE 8000
 
