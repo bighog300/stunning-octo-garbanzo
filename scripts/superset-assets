@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+python "$(dirname "$0")/superset_assets_cli.py" "$@"

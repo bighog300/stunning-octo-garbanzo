@@ -108,6 +108,35 @@ SUPERSET_PASSWORD=admin
 ARTIO_DATABASE_URI=postgresql://postgres:postgres@postgres:5432/artio
 ```
 
+## Reproducible Superset dashboards
+
+Use the Superset assets CLI to keep dashboards reproducible across environments:
+
+```bash
+python scripts/superset_assets_cli.py export
+python scripts/superset_assets_cli.py import --overwrite
+python scripts/superset_assets_cli.py list
+python scripts/superset_assets_cli.py bootstrap --overwrite
+```
+
+Workflow:
+
+1. Build/update the dashboard manually in Superset once.
+2. Export assets to `superset/assets/artio_dashboards.zip`:
+
+```bash
+python scripts/superset_assets_cli.py export
+```
+
+3. Commit `superset/assets/artio_dashboards.zip` into the repository.
+4. On a new environment, start Superset and import the committed zip:
+
+```bash
+python scripts/superset_assets_cli.py import --overwrite
+```
+
+`bootstrap` runs `superset/bootstrap_artio_dashboard.py` first and then imports `superset/assets/artio_dashboards.zip` when present.
+
 ## Artio moderation CLI
 
 Use the local CLI to run and validate the moderation API + web UI:
