@@ -757,7 +757,13 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT *
+                SELECT event_id, source_name, source_domain, source_url, source_record_id,
+                       event_type, original_event_type, event_title, original_event_title,
+                       canonical_event_title, venue_name, venue_address, city, country,
+                       start_date, end_date, opening_datetime, description, image_url,
+                       raw_payload, linked_artists, artist_count, is_hidden, is_approved,
+                       moderation_override_exists, moderation_reason, moderator_notes,
+                       updated_at, crawl_timestamp, created_at
                 FROM app.event_records
                 WHERE event_id = %s::uuid
                 LIMIT 1
