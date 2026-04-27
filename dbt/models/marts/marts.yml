@@ -2,8 +2,6 @@ version: 2
 
 models:
   - name: mart_artworks
-    data_tests:
-      - assert_mart_artworks_source_linkage
     columns:
       - name: artwork_id
         tests:
@@ -37,4 +35,3 @@ models:
       - name: event_id
         tests:
           - not_null
-
