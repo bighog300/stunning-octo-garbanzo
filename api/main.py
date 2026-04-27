@@ -799,6 +799,10 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
 @app.post("/api/artists/{artist_name}/moderation")
 def update_artist_moderation(artist_name: str, payload: ArtistModerationPayload) -> dict[str, Any]:
     try:
+        canonical_artist_name = (
+            payload.canonical_artist_name.strip() if payload.canonical_artist_name else None
+        )
+        canonical_artist_name = canonical_artist_name or None
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -845,7 +849,7 @@ def update_artist_moderation(artist_name: str, payload: ArtistModerationPayload)
                     INSERT INTO app.artist_moderation_overrides (
                       artist_name, source_domain, is_hidden, canonical_artist_name, reason, updated_by, updated_at
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, now())
+                    VALUES (%s, %s, %s, NULLIF(%s, ''), %s, %s, now())
                     ON CONFLICT (artist_name, source_domain)
                     DO UPDATE SET
                       is_hidden = EXCLUDED.is_hidden,
@@ -860,7 +864,7 @@ def update_artist_moderation(artist_name: str, payload: ArtistModerationPayload)
                         artist_name,
                         source_domain,
                         payload.is_hidden,
-                        payload.canonical_artist_name,
+                        canonical_artist_name,
                         payload.reason,
                         payload.updated_by,
                     ),

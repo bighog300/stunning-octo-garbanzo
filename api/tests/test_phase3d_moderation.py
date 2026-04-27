@@ -56,6 +56,9 @@ class FakeCursor:
                 "artist_name": params[0],
                 "source_domain": params[1],
                 "is_hidden": params[2],
+                "canonical_artist_name": params[3],
+                "reason": params[4],
+                "updated_by": params[5],
             }
             return
 
@@ -135,6 +138,22 @@ def test_artist_moderation_override_upsert(monkeypatch):
     assert response["artist_moderation"]["is_hidden"] is True
 
 
+def test_artist_moderation_stores_and_returns_canonical_artist_name(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    response = main.update_artist_moderation(
+        "Latest Work",
+        main.ArtistModerationPayload(
+            is_hidden=True,
+            canonical_artist_name="Malose Pete",
+            reason="Navigation label; map artworks to real artist",
+            updated_by="craig",
+        ),
+    )
+
+    assert response["status"] == "updated"
+    assert response["artist_moderation"]["canonical_artist_name"] == "Malose Pete"
+
+
 def test_hidden_artist_default_excluded_and_include_hidden(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     visible = main.list_artists(limit=100, offset=0, include_hidden=False)
@@ -203,3 +222,43 @@ def test_canonical_filtered_artist_can_still_be_moderated(monkeypatch):
     assert response["artist_moderation"]["artist_name"] == "Latest Work"
     assert response["artist_moderation"]["source_domain"] == "art.co.za"
     assert response["artist_moderation"]["is_hidden"] is True
+
+
+def test_artist_moderation_trims_empty_canonical_artist_name(monkeypatch):
+    captured_params = {}
+
+    class CanonicalTrimCursor(FakeCursor):
+        def execute(self, query, params=None):
+            sql = " ".join(query.split())
+            self.conn.queries.append((sql, params))
+
+            if "WITH artist_candidates AS" in sql and "FROM app.artist_profiles" in sql:
+                self._row = {"source_domain": "art.co.za"}
+                return
+
+            if "INSERT INTO app.artist_moderation_overrides" in sql:
+                captured_params["canonical_artist_name"] = params[3]
+                self._row = {"canonical_artist_name": params[3]}
+                return
+
+    class CanonicalTrimConn(FakeConn):
+        def cursor(self):
+            return CanonicalTrimCursor(self)
+
+    @contextmanager
+    def canonical_trim_conn():
+        yield CanonicalTrimConn()
+
+    monkeypatch.setattr(main, "get_conn", canonical_trim_conn)
+    response = main.update_artist_moderation(
+        "Latest Work",
+        main.ArtistModerationPayload(
+            is_hidden=True,
+            canonical_artist_name="   ",
+            reason="clear",
+            updated_by="craig",
+        ),
+    )
+
+    assert captured_params["canonical_artist_name"] is None
+    assert response["artist_moderation"]["canonical_artist_name"] is None
