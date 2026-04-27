@@ -737,7 +737,8 @@ def list_admin_events(
             cur.execute(
                 f"""
                 SELECT event_id, event_title, original_event_title, canonical_event_title,
-                       event_type, original_event_type, linked_artists, venue_name, city, country,
+                       event_type, original_event_type, canonical_event_type,
+                       linked_artists, venue_name, city, country,
                        start_date, end_date, source_name, source_domain, source_url, crawl_timestamp,
                        is_hidden, is_approved, moderation_override_exists, moderation_reason, updated_at
                 FROM app.event_records
@@ -758,7 +759,8 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT event_id, source_name, source_domain, source_url, source_record_id,
-                       event_type, original_event_type, event_title, original_event_title,
+                       event_type, original_event_type, canonical_event_type,
+                       event_title, original_event_title,
                        canonical_event_title, venue_name, venue_address, city, country,
                        start_date, end_date, opening_datetime, description, image_url,
                        raw_payload, linked_artists, artist_count, is_hidden, is_approved,
