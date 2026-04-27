@@ -99,9 +99,7 @@ LEFT JOIN app.artist_moderation_overrides amo
 LEFT JOIN latest_review lr
     ON lr.artwork_id = m.artwork_id
 LEFT JOIN latest_approval la
-    ON la.artwork_id = m.artwork_id
-WHERE NOT COALESCE(amo.is_hidden, false)
-   OR amo.canonical_artist_name IS NOT NULL;
+    ON la.artwork_id = m.artwork_id;
 
 CREATE VIEW app.artist_event_links AS
 SELECT
