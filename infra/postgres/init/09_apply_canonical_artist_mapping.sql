@@ -1,7 +1,10 @@
 \connect artio
 
--- Run this script only after dbt has built analytics.mart_artworks (for example after `dbt run`).
--- This view intentionally lives outside init scripts because mart_artworks does not exist at initial DB bootstrap time.
+-- Phase 4A canonical artist mapping apply script.
+-- Re-apply after dbt run so app views point at analytics mart tables.
+-- If CREATE OR REPLACE VIEW fails due to prior column shape differences in old volumes,
+-- run DROP VIEW app.artist_profiles; and re-run this script.
+
 CREATE OR REPLACE VIEW app.artwork_records AS
 WITH latest_review AS (
     SELECT DISTINCT ON (artwork_id)
@@ -74,29 +77,6 @@ LEFT JOIN latest_approval la
     ON la.artwork_id = m.artwork_id
 WHERE NOT COALESCE(amo.is_hidden, false)
    OR amo.canonical_artist_name IS NOT NULL;
-
-CREATE OR REPLACE VIEW app.event_records AS
-SELECT
-    event_id,
-    source_name,
-    source_domain,
-    source_url,
-    source_record_id,
-    event_type,
-    event_title,
-    venue_name,
-    venue_address,
-    city,
-    country,
-    start_date,
-    end_date,
-    opening_datetime,
-    description,
-    image_url,
-    artist_count,
-    crawl_timestamp,
-    created_at
-FROM analytics.mart_events;
 
 CREATE OR REPLACE VIEW app.artist_event_links AS
 SELECT

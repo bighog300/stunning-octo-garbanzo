@@ -56,13 +56,15 @@ docker compose exec dbt dbt test --profiles-dir /opt/artio/dbt
 6. Replace the placeholder with the real app view(s) after dbt:
 
 ```bash
-docker compose exec postgres psql -U artio -d artio -f /docker-entrypoint-initdb.d/08_apply_app_artist_profiles_view.sql
+docker compose exec postgres psql -U postgres -d artio \
+  -f /docker-entrypoint-initdb.d/09_apply_canonical_artist_mapping.sql
 ```
 
 For an existing Postgres volume, re-apply the mounted SQL file directly inside the container:
 
 ```bash
-docker compose exec postgres psql -U artio -d artio -f /docker-entrypoint-initdb.d/08_apply_app_artist_profiles_view.sql
+docker compose exec postgres psql -U postgres -d artio \
+  -f /docker-entrypoint-initdb.d/09_apply_canonical_artist_mapping.sql
 ```
 
 ## Validation checks
