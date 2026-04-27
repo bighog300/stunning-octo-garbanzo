@@ -3,18 +3,29 @@
 -- Ensure app.artist_profiles keeps the runtime shape and latest edit join in real Docker runs.
 -- This file is mounted into /docker-entrypoint-initdb.d and can be re-applied manually.
 CREATE OR REPLACE VIEW app.artist_profiles AS
-WITH base_profiles AS (
-    SELECT DISTINCT ON (artist_name, source_domain)
-        artist_name,
-        source_domain,
-        source_url AS profile_url,
-        description AS original_artist_bio,
-        COUNT(*) OVER (PARTITION BY artist_name, source_domain) AS artwork_count,
-        MAX(crawl_timestamp) OVER (PARTITION BY artist_name, source_domain) AS last_seen
-    FROM app.artwork_records
-    WHERE artist_name IS NOT NULL
-      AND description IS NOT NULL
-    ORDER BY artist_name, source_domain, crawl_timestamp DESC NULLS LAST
+WITH artist_rollup AS (
+    SELECT
+        ar.artist_name,
+        ar.source_domain,
+        COUNT(*) AS artwork_count,
+        MAX(ar.crawl_timestamp) AS last_seen
+    FROM app.artwork_records ar
+    WHERE ar.artist_name IS NOT NULL
+    GROUP BY ar.artist_name, ar.source_domain
+),
+latest_profile_row AS (
+    SELECT DISTINCT ON (ar.artist_name, ar.source_domain)
+        ar.artist_name,
+        ar.source_domain,
+        ar.source_url AS profile_url,
+        ar.description AS original_artist_bio
+    FROM app.artwork_records ar
+    WHERE ar.artist_name IS NOT NULL
+    ORDER BY
+        ar.artist_name,
+        ar.source_domain,
+        (ar.source_url IS NOT NULL AND ar.description IS NOT NULL) DESC,
+        ar.crawl_timestamp DESC NULLS LAST
 ),
 latest_bio_edits AS (
     SELECT DISTINCT ON (artist_name, source_domain)
@@ -28,11 +39,11 @@ latest_bio_edits AS (
     ORDER BY artist_name, source_domain, created_at DESC
 )
 SELECT
-    bp.artist_name,
-    bp.source_domain,
-    bp.profile_url,
-    COALESCE(lbe.edited_bio, bp.original_artist_bio) AS artist_bio,
-    bp.original_artist_bio,
+    r.artist_name,
+    r.source_domain,
+    p.profile_url,
+    COALESCE(lbe.edited_bio, p.original_artist_bio) AS artist_bio,
+    p.original_artist_bio,
     lbe.edited_bio,
     lbe.edited_by,
     lbe.edited_at,
@@ -40,9 +51,12 @@ SELECT
     lbe.edited_by AS bio_edited_by,
     lbe.edit_notes AS bio_edit_notes,
     lbe.edited_at AS bio_last_edited_at,
-    bp.artwork_count,
-    bp.last_seen
-FROM base_profiles bp
+    r.artwork_count,
+    r.last_seen
+FROM artist_rollup r
+LEFT JOIN latest_profile_row p
+    ON p.artist_name = r.artist_name
+   AND p.source_domain = r.source_domain
 LEFT JOIN latest_bio_edits lbe
-    ON lbe.artist_name = bp.artist_name
-   AND lbe.source_domain = bp.source_domain;
+    ON lbe.artist_name = r.artist_name
+   AND lbe.source_domain = r.source_domain;
