@@ -12,6 +12,21 @@ import sys
 import tempfile
 from typing import Any
 
+from scraper.parsers.artcoza import artist_name_from_slug
+
+ARTIST_NAME_DIAGNOSTIC_DENYLIST = {
+    "artist statement",
+    "about the artist",
+    "selected works",
+    "latest work",
+    "artworks",
+    "paintings",
+    "prints",
+    "drawing",
+    "sculpture",
+    "african queens: restoring history",
+}
+
 
 @dataclass
 class ExtractionStats:
@@ -311,6 +326,44 @@ def build_changed_records(
     return changed[:show_changes]
 
 
+def _is_single_token(name: str) -> bool:
+    return len([token for token in name.split() if token]) == 1
+
+
+def build_suspect_artist_names(records: list[dict[str, Any]]) -> list[dict[str, str]]:
+    suspects: list[dict[str, str]] = []
+    for record in records:
+        extracted = _safe_text(record.get("artist_name"))
+        if not extracted:
+            continue
+
+        source_url = _safe_text(record.get("source_url"))
+        lowered = extracted.casefold()
+        suggested = artist_name_from_slug(source_url) if source_url else None
+        reason: str | None = None
+
+        if lowered in ARTIST_NAME_DIAGNOSTIC_DENYLIST:
+            reason = "section_label_denylist"
+        elif ":" in extracted:
+            reason = "contains_colon_exhibition_like"
+        elif len(extracted) > 60:
+            reason = "name_too_long"
+        elif _is_single_token(extracted) and suggested:
+            reason = "single_token_with_known_slug_override"
+
+        if reason:
+            suspects.append(
+                {
+                    "extracted_artist_name": extracted,
+                    "source_url": source_url,
+                    "suggested_artist_name": suggested or "",
+                    "reason": reason,
+                }
+            )
+
+    return suspects
+
+
 def load_baseline_from_db(limit: int) -> list[dict[str, Any]]:
     try:
         import psycopg
@@ -455,6 +508,7 @@ def main(argv: list[str] | None = None) -> int:
             recrawl_stats = build_stats("after", recrawl_records)
 
         changed_records = build_changed_records(matched_pairs, show_changes=args.show_changes)
+        suspect_artist_names = build_suspect_artist_names(recrawl_records)
 
         report = {
             "generated_at": datetime.now(UTC).isoformat(),
@@ -464,6 +518,8 @@ def main(argv: list[str] | None = None) -> int:
             "matched": asdict(matched_metrics),
             "delta": _delta(baseline_stats, recrawl_stats),
             "changed_records": changed_records,
+            "suspect_artist_name_count": len(suspect_artist_names),
+            "suspect_artist_names": suspect_artist_names,
             "metadata": {
                 "baseline_limit": args.baseline_limit,
                 "max_artists": args.max_artists,

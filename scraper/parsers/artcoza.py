@@ -38,6 +38,36 @@ PHONE_OR_EMAIL_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+KNOWN_ARTIST_SLUG_OVERRIDES = {
+    "hoseamatlou": "Hosea Matlou",
+    "bastiaanvanstenis": "Bastiaan Van Stenis",
+    "gunthervanderreis": "Gunther Van Der Reis",
+    "collenmaswanganyi": "Collen Maswanganyi",
+    "michelenigrini": "Michele Nigrini",
+    "nickyliebenberg": "Nicky Liebenberg",
+}
+
+ARTIST_SECTION_LABELS = {
+    "artist statement",
+    "about the artist",
+    "selected works",
+    "latest work",
+    "artworks",
+    "paintings",
+    "prints",
+    "drawing",
+    "sculpture",
+    "african queens: restoring history",
+}
+ARTIST_CHROME_SNIPPETS = ("recent work", "featured work", "art in south africa")
+
+HEADING_NAME_SELECTORS = (
+    "h1::text",
+    "h2::text",
+    ".artist-name::text",
+    ".entry-title::text",
+)
+
 
 def _normalize_whitespace(value: str | None) -> str:
     if not value:
@@ -63,22 +93,82 @@ def _section_text(selector: Selector) -> str:
     return _clean_block(" ".join(selector.xpath(".//text()[normalize-space()]").getall()))
 
 
-def extract_artist_name(html: str) -> str:
+def _slug_from_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    path = urlparse(url).path.strip("/")
+    if not path:
+        return None
+    return path.split("/")[0].strip().lower() or None
+
+
+def artist_name_from_slug(url: str) -> str | None:
+    slug = _slug_from_url(url)
+    if not slug:
+        return None
+    if slug in KNOWN_ARTIST_SLUG_OVERRIDES:
+        return KNOWN_ARTIST_SLUG_OVERRIDES[slug]
+    if "-" in slug or "_" in slug:
+        return slug.replace("-", " ").replace("_", " ").title()
+    return None
+
+
+def clean_artist_title(title: str) -> str | None:
+    cleaned = _normalize_whitespace(title)
+    if not cleaned:
+        return None
+    cleaned = re.sub(r"\bArt\.co\.za\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bSouth African Artists\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bArtist Statement\b", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bAbout\b", " ", cleaned, flags=re.IGNORECASE)
+    parts = [part.strip() for part in re.split(r"[|\-]", cleaned) if part.strip()]
+    if not parts:
+        return None
+    for part in parts:
+        if not _is_artist_label_candidate(part):
+            return part
+    return parts[0]
+
+
+def _is_artist_label_candidate(candidate: str) -> bool:
+    lowered = _normalize_whitespace(candidate).lower()
+    if not lowered:
+        return True
+    if lowered in ARTIST_SECTION_LABELS:
+        return True
+    if "about " in lowered and len(lowered.split()) <= 6:
+        return True
+    if any(snippet in lowered for snippet in ARTIST_CHROME_SNIPPETS):
+        return True
+    if ":" in candidate and len(candidate.split()) > 2:
+        return True
+    return False
+
+
+def extract_artist_name(html: str, url: str | None = None) -> str | None:
     sel = Selector(text=html)
-    selectors = (
-        "h1::text",
-        "h2::text",
-        ".artist-name::text",
-        "title::text",
-    )
-    for css in selectors:
-        value = sel.css(css).get()
-        cleaned = _normalize_whitespace(value)
-        if cleaned:
-            cleaned = re.split(r"\||-", cleaned)[0].strip()
-            if cleaned and cleaned.lower() not in {"art.co.za", "artists"}:
-                return cleaned
-    return ""
+    fallback_candidate: str | None = None
+
+    for css in HEADING_NAME_SELECTORS:
+        value = _normalize_whitespace(sel.css(css).get())
+        if not value:
+            continue
+        if _is_artist_label_candidate(value):
+            fallback_candidate = fallback_candidate or value
+            continue
+        return value
+
+    page_title = clean_artist_title(sel.css("title::text").get() or "")
+    if page_title and not _is_artist_label_candidate(page_title):
+        return page_title
+
+    slug_name = artist_name_from_slug(url or "")
+    if slug_name:
+        return slug_name
+
+    if fallback_candidate and not _is_artist_label_candidate(fallback_candidate):
+        return fallback_candidate
+    return None
 
 
 def extract_artist_bio(html: str) -> str:
