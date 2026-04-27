@@ -125,7 +125,7 @@ class SupersetClient:
         data = self._request("POST", "/api/v1/database/", expected_status=(201,), json=payload)
         return data["id"]
 
-    def get_dataset(self, database_id: int, schema: str, table_name: str) -> dict[str, Any] | None:
+    def get_datasets_by_table_name(self, table_name: str) -> list[dict[str, Any]]:
         query = {
             "q": json.dumps(
                 {
@@ -136,18 +136,37 @@ class SupersetClient:
             )
         }
         data = self._request("GET", "/api/v1/dataset/", params=query)
-        result = data.get("result", [])
+        return data.get("result", [])
+
+    def get_dataset(
+        self,
+        database_id: int,
+        schema: str,
+        table_name: str,
+        dataset_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        result = self.get_datasets_by_table_name(table_name)
 
         for dataset in result:
             if dataset.get("table_name") != table_name:
                 continue
+            if dataset_name and dataset.get("dataset_name") == dataset_name:
+                return dataset
             if dataset.get("schema") != schema:
                 continue
             db = dataset.get("database")
             db_id = db.get("id") if isinstance(db, dict) else dataset.get("database_id")
             if db_id in (None, database_id):
                 return dataset
-        return None
+
+        if dataset_name:
+            for dataset in result:
+                if dataset.get("table_name") == dataset_name:
+                    return dataset
+                if dataset.get("dataset_name") == dataset_name:
+                    return dataset
+
+        return result[0] if result else None
 
     def create_dataset(self, database_id: int, schema: str, table_name: str, sql: str | None = None) -> int:
         payload: dict[str, Any] = {
@@ -307,11 +326,26 @@ def kpi_chart_definition(slice_name: str, dataset_id: int) -> dict[str, Any]:
     }
 
 
-def ensure_dataset(client: SupersetClient, database_id: int, schema: str, table_name: str, sql: str | None = None) -> int:
-    existing = client.get_dataset(database_id=database_id, schema=schema, table_name=table_name)
+def ensure_dataset(
+    client: SupersetClient,
+    database_id: int,
+    schema: str,
+    table_name: str,
+    sql: str | None = None,
+    dataset_name: str | None = None,
+) -> int:
+    existing = client.get_dataset(
+        database_id=database_id,
+        schema=schema,
+        table_name=table_name,
+        dataset_name=dataset_name,
+    )
     if existing:
         dataset_id = existing["id"]
-        print(f"Dataset exists: {schema}.{table_name} (id={dataset_id})")
+        if table_name == ARTIST_PROFILE_TABLE:
+            print(f"Reusing existing dataset artist_profiles id={dataset_id}")
+        else:
+            print(f"Dataset exists: {schema}.{table_name} (id={dataset_id})")
         return dataset_id
 
     dataset_id = client.create_dataset(database_id=database_id, schema=schema, table_name=table_name, sql=sql)
@@ -365,6 +399,7 @@ def main() -> int:
         schema=ARTWORK_GALLERY_SCHEMA,
         table_name=ARTWORK_GALLERY_TABLE,
         sql=ARTWORK_GALLERY_SQL,
+        dataset_name=ARTWORK_GALLERY_TABLE,
     )
 
     dashboard = client.get_dashboard_by_title(DASHBOARD_TITLE)
