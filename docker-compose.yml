@@ -109,6 +109,7 @@ services:
     volumes:
       - ./crawlers:/opt/artio/crawlers
       - ./scraper:/opt/artio/scraper
+      - ./reports/tmp:/opt/artio/reports/tmp
     working_dir: /opt/artio/crawlers
     command: tail -f /dev/null
     depends_on:
@@ -168,8 +169,8 @@ services:
 
   api:
     build:
-      context: ./api
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: api/Dockerfile
     container_name: artio_api
     restart: unless-stopped
     environment:
@@ -178,6 +179,9 @@ services:
       ARTIO_POSTGRES_DB: artio
       ARTIO_POSTGRES_USER: artio
       ARTIO_POSTGRES_PASSWORD: artio
+      PYTHONPATH: /opt/artio
+    volumes:
+      - ./reports/tmp:/opt/artio/reports/tmp
     ports:
       - "8000:8000"
     depends_on:
