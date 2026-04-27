@@ -80,3 +80,17 @@ SELECT
     source_url,
     crawl_timestamp
 FROM analytics.mart_artist_activity;
+
+CREATE OR REPLACE VIEW app.artist_profiles AS
+SELECT DISTINCT ON (artist_name)
+    artist_name,
+    source_domain,
+    source_url AS profile_url,
+    description AS artist_bio,
+    COUNT(*) OVER (PARTITION BY artist_name, source_domain) AS artwork_count,
+    MAX(crawl_timestamp) OVER (PARTITION BY artist_name, source_domain) AS last_seen
+FROM app.artwork_records
+WHERE source_domain = 'art.co.za'
+  AND artist_name IS NOT NULL
+  AND description IS NOT NULL
+ORDER BY artist_name, last_seen DESC;
