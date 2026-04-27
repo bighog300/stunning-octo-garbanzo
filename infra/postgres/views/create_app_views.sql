@@ -82,15 +82,43 @@ SELECT
 FROM analytics.mart_artist_activity;
 
 CREATE OR REPLACE VIEW app.artist_profiles AS
-SELECT DISTINCT ON (artist_name)
-    artist_name,
-    source_domain,
-    source_url AS profile_url,
-    description AS artist_bio,
-    COUNT(*) OVER (PARTITION BY artist_name, source_domain) AS artwork_count,
-    MAX(crawl_timestamp) OVER (PARTITION BY artist_name, source_domain) AS last_seen
-FROM app.artwork_records
-WHERE source_domain = 'art.co.za'
-  AND artist_name IS NOT NULL
-  AND description IS NOT NULL
-ORDER BY artist_name, last_seen DESC;
+WITH base_profiles AS (
+    SELECT DISTINCT ON (artist_name, source_domain)
+        artist_name,
+        source_domain,
+        source_url AS profile_url,
+        description AS original_artist_bio,
+        COUNT(*) OVER (PARTITION BY artist_name, source_domain) AS artwork_count,
+        MAX(crawl_timestamp) OVER (PARTITION BY artist_name, source_domain) AS last_seen
+    FROM app.artwork_records
+    WHERE artist_name IS NOT NULL
+      AND description IS NOT NULL
+    ORDER BY artist_name, source_domain, crawl_timestamp DESC NULLS LAST
+),
+latest_bio_edits AS (
+    SELECT DISTINCT ON (artist_name, source_domain)
+        artist_name,
+        source_domain,
+        edited_bio,
+        edited_by,
+        edit_notes,
+        created_at
+    FROM app.artist_profile_edits
+    ORDER BY artist_name, source_domain, created_at DESC
+)
+SELECT
+    bp.artist_name,
+    bp.source_domain,
+    bp.profile_url,
+    bp.original_artist_bio,
+    lbe.edited_bio AS edited_artist_bio,
+    COALESCE(lbe.edited_bio, bp.original_artist_bio) AS artist_bio,
+    lbe.edited_by AS bio_edited_by,
+    lbe.edit_notes AS bio_edit_notes,
+    lbe.created_at AS bio_last_edited_at,
+    bp.artwork_count,
+    bp.last_seen
+FROM base_profiles bp
+LEFT JOIN latest_bio_edits lbe
+    ON lbe.artist_name = bp.artist_name
+   AND lbe.source_domain = bp.source_domain;
