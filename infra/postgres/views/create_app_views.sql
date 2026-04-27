@@ -24,7 +24,38 @@ latest_approval AS (
     ORDER BY artwork_id, approved_at DESC
 )
 SELECT
-    m.*,
+    m.artwork_id,
+    m.raw_artwork_id,
+    m.artist_id,
+    COALESCE(amo.canonical_artist_name, m.artist_name) AS artist_name,
+    m.artist_name AS original_artist_name,
+    COALESCE(amo.is_hidden, false) AS artist_is_hidden,
+    amo.canonical_artist_name,
+    amo.reason AS artist_moderation_reason,
+    m.artwork_title,
+    m.year_start,
+    m.year_end,
+    m.artwork_date_text,
+    m.medium_text,
+    m.medium_category,
+    m.dimensions_text,
+    m.height_cm,
+    m.width_cm,
+    m.depth_cm,
+    m.price_text,
+    m.price_numeric,
+    m.currency_code,
+    m.source_name,
+    m.source_domain,
+    m.source_url,
+    m.image_url,
+    m.thumbnail_url,
+    m.description,
+    m.quality_score,
+    m.duplicate_group_key,
+    m.is_duplicate_candidate,
+    m.crawl_timestamp,
+    m.created_at,
     lr.review_status,
     lr.reviewed_at,
     lr.reviewed_by,
@@ -34,10 +65,15 @@ SELECT
     la.approved_by,
     la.approval_notes
 FROM analytics.mart_artworks m
+LEFT JOIN app.artist_moderation_overrides amo
+    ON amo.artist_name = m.artist_name
+   AND amo.source_domain = m.source_domain
 LEFT JOIN latest_review lr
     ON lr.artwork_id = m.artwork_id
 LEFT JOIN latest_approval la
-    ON la.artwork_id = m.artwork_id;
+    ON la.artwork_id = m.artwork_id
+WHERE NOT COALESCE(amo.is_hidden, false)
+   OR amo.canonical_artist_name IS NOT NULL;
 
 CREATE OR REPLACE VIEW app.event_records AS
 SELECT
