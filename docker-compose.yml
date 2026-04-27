@@ -22,6 +22,7 @@ x-airflow-common: &airflow-common
     - ./airflow/logs:/opt/airflow/logs
     - ./airflow/plugins:/opt/airflow/plugins
     - ./crawlers:/opt/artio/crawlers
+    - ./scraper:/opt/artio/scraper
     - ./dbt:/opt/artio/dbt
     - ./infra:/opt/artio/infra
   user: "${AIRFLOW_UID:-50000}:0"
