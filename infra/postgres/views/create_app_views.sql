@@ -91,27 +91,51 @@ LEFT JOIN latest_approval la
     ON la.artwork_id = m.artwork_id;
 
 CREATE OR REPLACE VIEW app.event_records AS
+WITH linked_artists AS (
+    SELECT
+        event_id,
+        array_agg(DISTINCT artist_name ORDER BY artist_name) FILTER (WHERE artist_name IS NOT NULL) AS linked_artists
+    FROM analytics.mart_artist_activity
+    GROUP BY event_id
+)
 SELECT
-    event_id,
-    source_name,
-    source_domain,
-    source_url,
-    source_record_id,
-    event_type,
-    event_title,
-    venue_name,
-    venue_address,
-    city,
-    country,
-    start_date,
-    end_date,
-    opening_datetime,
-    description,
-    image_url,
-    artist_count,
-    crawl_timestamp,
-    created_at
-FROM analytics.mart_events;
+    me.event_id,
+    me.source_name,
+    me.source_domain,
+    me.source_url,
+    me.source_record_id,
+    COALESCE(emo.event_type, me.event_type) AS event_type,
+    me.event_type AS original_event_type,
+    COALESCE(emo.canonical_event_title, me.event_title) AS event_title,
+    me.event_title AS original_event_title,
+    emo.canonical_event_title,
+    me.venue_name,
+    me.venue_address,
+    me.city,
+    me.country,
+    me.start_date,
+    me.end_date,
+    me.opening_datetime,
+    me.description,
+    me.image_url,
+    re.raw_payload,
+    COALESCE(la.linked_artists, ARRAY[]::TEXT[]) AS linked_artists,
+    me.artist_count,
+    COALESCE(emo.is_hidden, false) AS is_hidden,
+    COALESCE(emo.is_approved, false) AS is_approved,
+    (emo.id IS NOT NULL) AS moderation_override_exists,
+    emo.moderation_reason,
+    emo.moderator_notes,
+    emo.updated_at,
+    me.crawl_timestamp,
+    me.created_at
+FROM analytics.mart_events me
+LEFT JOIN raw.events re
+    ON re.id = me.event_id
+LEFT JOIN linked_artists la
+    ON la.event_id = me.event_id
+LEFT JOIN app.event_moderation_overrides emo
+    ON emo.event_id = me.event_id;
 
 CREATE OR REPLACE VIEW app.artist_event_links AS
 SELECT

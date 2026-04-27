@@ -95,3 +95,15 @@ CREATE TABLE IF NOT EXISTS app.artist_moderation_overrides (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (artist_name, source_domain)
 );
+
+CREATE TABLE IF NOT EXISTS app.event_moderation_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID NOT NULL UNIQUE,
+    is_hidden BOOLEAN NOT NULL DEFAULT false,
+    is_approved BOOLEAN NOT NULL DEFAULT false,
+    canonical_event_title TEXT,
+    event_type TEXT,
+    moderation_reason TEXT,
+    moderator_notes TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
