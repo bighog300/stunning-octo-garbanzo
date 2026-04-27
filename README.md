@@ -146,6 +146,27 @@ python scripts/superset_assets_cli.py import --overwrite
 
 `bootstrap` runs `superset/bootstrap_artio_dashboard.py` first and then imports `superset/assets/artio_dashboards.zip` when present.
 
+
+## Art.co.za extraction audit (Phase 4D)
+
+Run a non-destructive recrawl (dry-run) and compare extraction quality against current `raw.artworks` records:
+
+```bash
+python -m artio_cli.audit_artcoza_extraction --print-json
+```
+
+This command:
+
+- samples baseline rows from `raw.artworks` where `source_domain = 'art.co.za'`,
+- runs `artcoza_artworks` in `dry_run=true` mode (no raw/app writes),
+- writes a before/after JSON report to `app/reports/artcoza_extraction_audit.json`.
+
+You can also reuse a pre-generated crawl export:
+
+```bash
+python -m artio_cli.audit_artcoza_extraction --recrawl-jsonl /path/to/artcoza.jsonl
+```
+
 ## Artio moderation CLI
 
 Use the local CLI to run and validate the moderation API + web UI:
