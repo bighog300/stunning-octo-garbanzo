@@ -112,6 +112,7 @@ SELECT
     me.source_record_id,
     COALESCE(emo.event_type, me.event_type) AS event_type,
     me.event_type AS original_event_type,
+    emo.event_type AS canonical_event_type,
     COALESCE(emo.canonical_event_title, me.original_event_title) AS event_title,
     me.original_event_title,
     emo.canonical_event_title,

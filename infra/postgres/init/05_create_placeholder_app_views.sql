@@ -55,6 +55,7 @@ SELECT
     NULL::TEXT AS source_record_id,
     NULL::TEXT AS event_type,
     NULL::TEXT AS original_event_type,
+    NULL::TEXT AS canonical_event_type,
     NULL::TEXT AS event_title,
     NULL::TEXT AS original_event_title,
     NULL::TEXT AS canonical_event_title,
