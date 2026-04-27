@@ -14,6 +14,23 @@ async function api(path, options = {}) {
   return res.json()
 }
 
+function getArtists({ search = '', limit = 100, offset = 0 } = {}) {
+  const params = new URLSearchParams({
+    limit: String(limit),
+    offset: String(offset),
+  })
+
+  if (search?.trim()) {
+    params.set('search', search.trim())
+  }
+
+  return api(`/api/artists?${params.toString()}`)
+}
+
+function getArtistProfile(artistName) {
+  return api(`/api/artists/${encodeURIComponent(artistName)}`)
+}
+
 function useFetch(path) {
   const [data, setData] = React.useState([])
   const [loading, setLoading] = React.useState(true)
@@ -22,6 +39,7 @@ function useFetch(path) {
   React.useEffect(() => {
     let mounted = true
     setLoading(true)
+    setError('')
     api(path)
       .then((json) => mounted && setData(json))
       .catch((err) => mounted && setError(err.message))
@@ -38,6 +56,7 @@ function Nav() {
   return (
     <nav>
       <Link to="/">Artworks</Link>
+      <Link to="/artists">Artists</Link>
       <Link to="/review-queue">Review Queue</Link>
     </nav>
   )
@@ -65,6 +84,164 @@ function ArtworkTable({ rows }) {
         ))}
       </tbody>
     </table>
+  )
+}
+
+function ArtistListPage() {
+  const [search, setSearch] = React.useState('')
+  const [artists, setArtists] = React.useState([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState('')
+
+  React.useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError('')
+
+    getArtists({ search, limit: 100, offset: 0 })
+      .then((json) => {
+        if (!mounted) return
+        setArtists(Array.isArray(json) ? json : [])
+      })
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoading(false))
+
+    return () => {
+      mounted = false
+    }
+  }, [search])
+
+  return (
+    <section>
+      <h2>Artists</h2>
+      <label className="field-label" htmlFor="artist-search">Search artists</label>
+      <input
+        id="artist-search"
+        type="search"
+        className="search-input"
+        placeholder="Search by artist name"
+        value={search}
+        onChange={(e) => setSearch(e.target.value)}
+      />
+
+      {loading && <p>Loading artists...</p>}
+      {!loading && error && <p className="error-text">Failed to load artists: {error}</p>}
+      {!loading && !error && artists.length === 0 && <p>No artists found.</p>}
+
+      {!loading && !error && artists.length > 0 && (
+        <div className="artist-grid">
+          {artists.map((artist, idx) => {
+            const artistName = artist.artist_name || 'Unknown artist'
+            const bioText = artist.artist_bio || 'No bio available'
+            const bioPreview = bioText.length > 200 ? `${bioText.slice(0, 200)}...` : bioText
+            return (
+              <article className="artist-card" key={`${artistName}-${idx}`}>
+                <h3>{artistName}</h3>
+                <p><strong>Artworks:</strong> {artist.artwork_count ?? 0}</p>
+                <p><strong>Source:</strong> {artist.source_domain || 'Unknown'}</p>
+                <p>{bioPreview}</p>
+                {artist.last_seen && <p><strong>Last seen:</strong> {artist.last_seen}</p>}
+                <Link to={`/artists/${encodeURIComponent(artistName)}`}>View artist profile</Link>
+              </article>
+            )
+          })}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function ArtistProfilePage() {
+  const { artistName = '' } = useParams()
+  const [profile, setProfile] = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState('')
+
+  React.useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError('')
+
+    getArtistProfile(artistName)
+      .then((json) => mounted && setProfile(json))
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoading(false))
+
+    return () => {
+      mounted = false
+    }
+  }, [artistName])
+
+  if (loading) return <section><h2>Artist Profile</h2><p>Loading artist profile...</p></section>
+  if (error) return <section><h2>Artist Profile</h2><p className="error-text">Failed to load artist profile: {error}</p></section>
+  if (!profile || !profile.artist) return <section><h2>Artist Profile</h2><p>Artist not found.</p></section>
+
+  const { artist, artworks = [], events = [] } = profile
+  const displayName = artist.artist_name || artistName
+
+  return (
+    <section>
+      <h2>{displayName}</h2>
+      <p><strong>Artwork count:</strong> {artist.artwork_count ?? artworks.length ?? 0}</p>
+      <p>{artist.artist_bio || 'No bio available'}</p>
+      {artist.source_url && (
+        <p>
+          <strong>Profile:</strong>{' '}
+          <a href={artist.source_url} target="_blank" rel="noreferrer">{artist.source_url}</a>
+        </p>
+      )}
+
+      <h3>Artworks</h3>
+      {artworks.length === 0 && <p>No artworks found.</p>}
+      {artworks.length > 0 && (
+        <div className="artwork-grid">
+          {artworks.map((work, idx) => {
+            const title = work.artwork_title || work.title || 'Untitled'
+            const imageUrl = work.image_url || work.thumbnail_url
+            return (
+              <article className="artwork-card" key={`${work.artwork_id || title}-${idx}`}>
+                {imageUrl ? <img src={imageUrl} alt={title} /> : <div className="image-fallback">No image</div>}
+                <h4>{title}</h4>
+                {work.medium_text && <p>{work.medium_text}</p>}
+                {(work.year_start || work.year_end) && (
+                  <p>
+                    {work.year_start || ''}
+                    {work.year_end ? `-${work.year_end}` : ''}
+                  </p>
+                )}
+                {work.review_status && <p><strong>Status:</strong> {work.review_status}</p>}
+                {work.artwork_id && <Link to={`/artworks/${work.artwork_id}`}>View artwork</Link>}
+              </article>
+            )
+          })}
+        </div>
+      )}
+
+      <h3>Events</h3>
+      {events.length === 0 && <p>No events linked yet.</p>}
+      {events.length > 0 && (
+        <div className="event-list">
+          {events.map((event, idx) => (
+            <article className="event-card" key={`${event.event_id || event.title || event.event_title}-${idx}`}>
+              <h4>{event.event_title || event.title || 'Untitled event'}</h4>
+              {(event.start_date || event.end_date) && (
+                <p>
+                  {event.start_date || 'Unknown start'}
+                  {event.end_date ? ` → ${event.end_date}` : ''}
+                </p>
+              )}
+              <p>
+                {event.venue_name || 'Unknown venue'}
+                {(event.city || event.country) && ` — ${[event.city, event.country].filter(Boolean).join(', ')}`}
+              </p>
+              {event.source_url && (
+                <a href={event.source_url} target="_blank" rel="noreferrer">Event source</a>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -107,7 +284,7 @@ function ArtworkDetailPage() {
       {artwork.image_url && <img src={artwork.image_url} alt={artwork.artwork_title} />}
       <ul>
         <li><strong>Artist:</strong> {artwork.artist_name}</li>
-        <li><strong>Source:</strong> {artwork.source_name} — <a href={artwork.source_url} target="_blank">{artwork.source_url}</a></li>
+        <li><strong>Source:</strong> {artwork.source_name} — <a href={artwork.source_url} target="_blank" rel="noreferrer">{artwork.source_url}</a></li>
         <li><strong>Medium:</strong> {artwork.medium_text}</li>
         <li><strong>Year:</strong> {artwork.year_start} / {artwork.year_end}</li>
         <li><strong>Quality:</strong> {artwork.quality_score}</li>
@@ -129,6 +306,8 @@ function App() {
       <Nav />
       <Routes>
         <Route path="/" element={<ArtworkListPage />} />
+        <Route path="/artists" element={<ArtistListPage />} />
+        <Route path="/artists/:artistName" element={<ArtistProfilePage />} />
         <Route path="/review-queue" element={<ReviewQueuePage />} />
         <Route path="/artworks/:artworkId" element={<ArtworkDetailPage />} />
       </Routes>
