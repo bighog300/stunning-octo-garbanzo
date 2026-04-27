@@ -24,6 +24,8 @@ class FakeCursor:
                 {
                     "event_id": "11111111-1111-1111-1111-111111111111",
                     "event_title": "Studio Talk",
+                    "original_event_title": "Studio Talk",
+                    "canonical_event_title": None,
                     "event_type": "talk",
                     "linked_artists": ["Alice"],
                     "venue_name": "Main Hall",
@@ -41,10 +43,12 @@ class FakeCursor:
             ]
             return
 
-        if "SELECT * FROM app.event_records" in sql:
+        if "FROM app.event_records" in sql and "WHERE event_id = %s::uuid" in sql:
             self._row = {
                 "event_id": params[0],
                 "event_title": "Studio Talk",
+                "original_event_title": "Studio Talk",
+                "canonical_event_title": None,
                 "raw_payload": {"raw": True},
                 "is_hidden": False,
                 "is_approved": False,
@@ -117,12 +121,14 @@ def test_list_admin_events(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     rows = main.list_admin_events(limit=20, moderation_status="all")
     assert rows[0]["event_title"] == "Studio Talk"
+    assert rows[0]["original_event_title"] == "Studio Talk"
 
 
 def test_get_admin_event(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     payload = main.get_admin_event("11111111-1111-1111-1111-111111111111")
     assert payload["event"]["event_title"] == "Studio Talk"
+    assert payload["event"]["original_event_title"] == "Studio Talk"
     assert payload["linked_artists"][0]["artist_name"] == "Alice"
 
 

@@ -97,6 +97,12 @@ WITH linked_artists AS (
         array_agg(DISTINCT artist_name ORDER BY artist_name) FILTER (WHERE artist_name IS NOT NULL) AS linked_artists
     FROM analytics.mart_artist_activity
     GROUP BY event_id
+),
+events_with_source_title AS (
+    SELECT
+        me.*,
+        me.event_title AS original_event_title
+    FROM analytics.mart_events me
 )
 SELECT
     me.event_id,
@@ -106,8 +112,8 @@ SELECT
     me.source_record_id,
     COALESCE(emo.event_type, me.event_type) AS event_type,
     me.event_type AS original_event_type,
-    COALESCE(emo.canonical_event_title, me.event_title) AS event_title,
-    me.event_title AS original_event_title,
+    COALESCE(emo.canonical_event_title, me.original_event_title) AS event_title,
+    me.original_event_title,
     emo.canonical_event_title,
     me.venue_name,
     me.venue_address,
@@ -129,7 +135,7 @@ SELECT
     emo.updated_at,
     me.crawl_timestamp,
     me.created_at
-FROM analytics.mart_events me
+FROM events_with_source_title me
 LEFT JOIN raw.events re
     ON re.id = me.event_id
 LEFT JOIN linked_artists la
