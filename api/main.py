@@ -639,9 +639,9 @@ def list_artists(
             with conn.cursor() as cur:
                 cur.execute(
                     f"""
-                    SELECT artist_name, source_domain, profile_url, original_artist_bio,
-                           edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
-                           bio_last_edited_at, artwork_count, last_seen,
+                    SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
+                           ap.edited_artist_bio, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
+                           ap.bio_last_edited_at, ap.artwork_count, ap.last_seen,
                            COALESCE(amo.is_hidden, false) AS is_hidden,
                            amo.canonical_artist_name,
                            amo.reason AS moderation_reason,
@@ -697,9 +697,9 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT artist_name, source_domain, profile_url, original_artist_bio,
-                           edited_artist_bio, artist_bio, bio_edited_by, bio_edit_notes,
-                           bio_last_edited_at, artwork_count, last_seen,
+                    SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
+                           ap.edited_artist_bio, ap.artist_bio, ap.bio_edited_by, ap.bio_edit_notes,
+                           ap.bio_last_edited_at, ap.artwork_count, ap.last_seen,
                            COALESCE(amo.is_hidden, false) AS is_hidden,
                            amo.canonical_artist_name,
                            amo.reason AS moderation_reason,
