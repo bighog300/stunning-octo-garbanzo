@@ -30,13 +30,15 @@ class ExtractionStats:
 
 
 @dataclass
-class AuditReport:
-    generated_at: str
-    source: str
-    baseline: ExtractionStats
-    recrawl: ExtractionStats
-    delta: dict[str, float]
-    metadata: dict[str, Any]
+class MatchedMetrics:
+    baseline_records_total: int
+    recrawl_records_total: int
+    matched_records_total: int
+    recrawl_only_records_total: int
+    baseline_only_records_total: int
+    matched_quality_before: float
+    matched_quality_after: float
+    matched_quality_delta: float
 
 
 def _safe_text(value: Any) -> str:
@@ -146,6 +148,169 @@ def _delta(before: ExtractionStats, after: ExtractionStats) -> dict[str, float]:
     return out
 
 
+def _parse_records_content(content: str) -> list[dict[str, Any]]:
+    text = content.lstrip()
+    if not text:
+        return []
+
+    records: list[dict[str, Any]] = []
+    if text.startswith("["):
+        payload = json.loads(content)
+        if not isinstance(payload, list):
+            raise ValueError("JSON input must be an array of records.")
+        iterable = payload
+    else:
+        iterable = [json.loads(line) for line in content.splitlines() if line.strip()]
+
+    for item in iterable:
+        if isinstance(item, dict) and "artwork_title" in item:
+            records.append(item)
+    return records
+
+
+def load_records_from_jsonl(path: Path) -> list[dict[str, Any]]:
+    return _parse_records_content(path.read_text(encoding="utf-8"))
+
+
+def _stable_match_key(record: dict[str, Any]) -> tuple[Any, ...] | None:
+    source_record_id = _safe_text(record.get("source_record_id"))
+    if source_record_id:
+        return ("source_record_id", source_record_id)
+
+    source_url = _safe_text(record.get("source_url"))
+    image_url = _safe_text(record.get("image_url"))
+    artwork_title = _safe_text(record.get("artwork_title"))
+    if source_url and image_url:
+        return ("source_url_image_url", source_url, image_url)
+    if source_url and artwork_title:
+        return ("source_url_artwork_title", source_url, artwork_title.casefold())
+    return None
+
+
+def match_records(
+    baseline_records: list[dict[str, Any]],
+    recrawl_records: list[dict[str, Any]],
+) -> tuple[list[tuple[dict[str, Any], dict[str, Any]]], list[dict[str, Any]], list[dict[str, Any]]]:
+    recrawl_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    recrawl_unmatched: list[dict[str, Any]] = []
+
+    for record in recrawl_records:
+        key = _stable_match_key(record)
+        if key is None:
+            recrawl_unmatched.append(record)
+            continue
+        recrawl_by_key.setdefault(key, []).append(record)
+
+    matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    baseline_only: list[dict[str, Any]] = []
+
+    for before in baseline_records:
+        key = _stable_match_key(before)
+        if key is None:
+            baseline_only.append(before)
+            continue
+        bucket = recrawl_by_key.get(key)
+        if bucket:
+            after = bucket.pop(0)
+            matched.append((before, after))
+            if not bucket:
+                recrawl_by_key.pop(key, None)
+        else:
+            baseline_only.append(before)
+
+    recrawl_only: list[dict[str, Any]] = recrawl_unmatched[:]
+    for bucket in recrawl_by_key.values():
+        recrawl_only.extend(bucket)
+
+    return matched, baseline_only, recrawl_only
+
+
+def _avg_quality(records: list[dict[str, Any]]) -> float:
+    if not records:
+        return 0.0
+    return round(statistics.fmean(_compute_quality_score(record) for record in records), 2)
+
+
+def build_matched_metrics(
+    baseline_records: list[dict[str, Any]],
+    recrawl_records: list[dict[str, Any]],
+    matched_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    baseline_only: list[dict[str, Any]],
+    recrawl_only: list[dict[str, Any]],
+) -> MatchedMetrics:
+    matched_before = [before for before, _ in matched_pairs]
+    matched_after = [after for _, after in matched_pairs]
+    quality_before = _avg_quality(matched_before)
+    quality_after = _avg_quality(matched_after)
+
+    return MatchedMetrics(
+        baseline_records_total=len(baseline_records),
+        recrawl_records_total=len(recrawl_records),
+        matched_records_total=len(matched_pairs),
+        recrawl_only_records_total=len(recrawl_only),
+        baseline_only_records_total=len(baseline_only),
+        matched_quality_before=quality_before,
+        matched_quality_after=quality_after,
+        matched_quality_delta=round(quality_after - quality_before, 2),
+    )
+
+
+def _preview(text: Any, max_len: int = 140) -> str:
+    clean = _safe_text(text)
+    if len(clean) <= max_len:
+        return clean
+    return f"{clean[:max_len - 1]}…"
+
+
+def build_changed_records(
+    matched_pairs: list[tuple[dict[str, Any], dict[str, Any]]],
+    show_changes: int,
+) -> list[dict[str, Any]]:
+    changed: list[dict[str, Any]] = []
+    for before, after in matched_pairs:
+        quality_before = _compute_quality_score(before)
+        quality_after = _compute_quality_score(after)
+        quality_delta = round(quality_after - quality_before, 2)
+
+        artist_before = _safe_text(before.get("artist_name"))
+        artist_after = _safe_text(after.get("artist_name"))
+        description_before = _safe_text(before.get("description"))
+        description_after = _safe_text(after.get("description"))
+
+        if (
+            artist_before == artist_after
+            and description_before == description_after
+            and quality_delta == 0
+        ):
+            continue
+
+        changed.append(
+            {
+                "source_record_id": _safe_text(after.get("source_record_id") or before.get("source_record_id")),
+                "artist_name_before": artist_before,
+                "artist_name_after": artist_after,
+                "description_before_preview": _preview(description_before),
+                "description_after_preview": _preview(description_after),
+                "quality_before": quality_before,
+                "quality_after": quality_after,
+                "quality_delta": quality_delta,
+            }
+        )
+
+    def sort_key(record: dict[str, Any]) -> tuple[int, float]:
+        delta = float(record["quality_delta"])
+        if delta > 0:
+            return (0, -delta)
+        if delta < 0:
+            return (1, delta)
+        return (2, 0.0)
+
+    changed.sort(key=sort_key)
+    if show_changes < 0:
+        return changed
+    return changed[:show_changes]
+
+
 def load_baseline_from_db(limit: int) -> list[dict[str, Any]]:
     try:
         import psycopg
@@ -165,6 +330,9 @@ def load_baseline_from_db(limit: int) -> list[dict[str, Any]]:
 
     query = """
         SELECT
+            source_record_id,
+            source_url,
+            image_url,
             artist_name,
             artwork_title,
             description,
@@ -181,19 +349,6 @@ def load_baseline_from_db(limit: int) -> list[dict[str, Any]]:
         with conn.cursor() as cur:
             cur.execute(query, (limit,))
             return [dict(row) for row in cur.fetchall()]
-
-
-def load_records_from_jsonl(path: Path) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        payload = json.loads(stripped)
-        if "artwork_title" not in payload:
-            continue
-        records.append(payload)
-    return records
 
 
 def run_non_destructive_recrawl(max_artists: int, max_records: int, scrapy_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -251,8 +406,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--recrawl-jsonl",
         type=Path,
         default=None,
-        help="Optional pre-generated dry-run crawl JSONL. When set, skip invoking scrapy.",
+        help="Optional pre-generated dry-run crawl JSON/JSONL. When set, skip invoking scrapy.",
     )
+    parser.add_argument("--matched-only", action="store_true", help="Compute baseline/recrawl stats on matched records only.")
+    parser.add_argument("--show-changes", type=int, default=10, help="Number of changed matched records to show; -1 means all.")
     parser.add_argument(
         "--print-json",
         action="store_true",
@@ -281,38 +438,58 @@ def main(argv: list[str] | None = None) -> int:
                 scrapy_dir=args.scrapy_dir,
             )
 
-        baseline_stats = build_stats("before", baseline_records)
-        recrawl_stats = build_stats("after", recrawl_records)
+        matched_pairs, baseline_only, recrawl_only = match_records(baseline_records, recrawl_records)
+        matched_metrics = build_matched_metrics(
+            baseline_records=baseline_records,
+            recrawl_records=recrawl_records,
+            matched_pairs=matched_pairs,
+            baseline_only=baseline_only,
+            recrawl_only=recrawl_only,
+        )
 
-        report = AuditReport(
-            generated_at=datetime.now(UTC).isoformat(),
-            source="art.co.za",
-            baseline=baseline_stats,
-            recrawl=recrawl_stats,
-            delta=_delta(baseline_stats, recrawl_stats),
-            metadata={
+        if args.matched_only:
+            baseline_stats = build_stats("before", [before for before, _ in matched_pairs])
+            recrawl_stats = build_stats("after", [after for _, after in matched_pairs])
+        else:
+            baseline_stats = build_stats("before", baseline_records)
+            recrawl_stats = build_stats("after", recrawl_records)
+
+        changed_records = build_changed_records(matched_pairs, show_changes=args.show_changes)
+
+        report = {
+            "generated_at": datetime.now(UTC).isoformat(),
+            "source": "art.co.za",
+            "baseline": asdict(baseline_stats),
+            "recrawl": asdict(recrawl_stats),
+            "matched": asdict(matched_metrics),
+            "delta": _delta(baseline_stats, recrawl_stats),
+            "changed_records": changed_records,
+            "metadata": {
                 "baseline_limit": args.baseline_limit,
                 "max_artists": args.max_artists,
                 "max_records": args.max_records,
                 "baseline_records_sampled": len(baseline_records),
                 "recrawl_records_sampled": len(recrawl_records),
+                "matched_only": args.matched_only,
+                "show_changes": args.show_changes,
                 "recrawl": recrawl_meta,
                 "non_destructive": True,
             },
-        )
+        }
 
         args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(asdict(report), indent=2), encoding="utf-8")
+        args.output.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
         print(f"Wrote audit report: {args.output}")
         print(
             "Summary: "
-            f"baseline quality={baseline_stats.quality_score}, "
-            f"recrawl quality={recrawl_stats.quality_score}, "
-            f"delta={report.delta['quality_score']}"
+            f"matched={matched_metrics.matched_records_total}, "
+            f"matched_quality_before={matched_metrics.matched_quality_before}, "
+            f"matched_quality_after={matched_metrics.matched_quality_after}, "
+            f"matched_quality_delta={matched_metrics.matched_quality_delta}"
         )
         if args.print_json:
-            print(json.dumps(asdict(report), indent=2))
+            print(json.dumps(report, indent=2))
     except Exception as exc:  # noqa: BLE001
         print(f"Audit failed: {exc}", file=sys.stderr)
         return 1
