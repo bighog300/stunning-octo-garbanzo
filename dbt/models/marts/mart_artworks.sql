@@ -19,6 +19,7 @@ select
     source_name,
     source_domain,
     source_url,
+    source_record_id,
     image_url,
     thumbnail_url,
     description,
@@ -28,4 +29,12 @@ select
     crawl_timestamp,
     created_at
 from {{ ref('int_artwork_normalized') }}
-where source_url is not null
+where
+    -- source_url is often NULL for valid art.co.za listings where the crawler only captures
+    -- stable record IDs/images; require stronger fallback identity/asset signals instead.
+    source_url is not null
+    or (
+        source_domain = 'art.co.za'
+        and coalesce(source_record_id, image_url, thumbnail_url) is not null
+        and coalesce(artwork_title, artist_name) is not null
+    )

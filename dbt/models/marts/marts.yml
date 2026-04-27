@@ -2,14 +2,13 @@ version: 2
 
 models:
   - name: mart_artworks
+    data_tests:
+      - assert_mart_artworks_source_linkage
     columns:
       - name: artwork_id
         tests:
           - not_null
           - unique
-      - name: source_url
-        tests:
-          - not_null
       - name: source_domain
         tests:
           - not_null
