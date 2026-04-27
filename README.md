@@ -148,3 +148,28 @@ python scripts/artio_moderation_cli.py health
 python scripts/artio_moderation_cli.py seed-review-queue --limit 100
 python scripts/artio_moderation_cli.py open
 ```
+
+## Artio API: artist profile endpoints (Phase 1)
+
+The FastAPI service now exposes artist browsing/profile endpoints backed by `app.artist_profiles`,
+`app.artwork_records`, and (when available) `app.artist_event_links`.
+
+Start/rebuild only the API service:
+
+```bash
+docker compose up -d --build api
+```
+
+Browse artists:
+
+```bash
+curl "http://localhost:8000/api/artists"
+curl "http://localhost:8000/api/artists?search=william"
+curl "http://localhost:8000/api/artists?source_domain=art.co.za&limit=50&offset=0"
+```
+
+Get one artist profile (URL-encode artist name as needed):
+
+```bash
+curl "http://localhost:8000/api/artists/Vincent%20van%20Gogh"
+```
