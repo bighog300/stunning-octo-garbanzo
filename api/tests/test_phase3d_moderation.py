@@ -60,15 +60,15 @@ class FakeCursor:
             return
 
         if "FROM app.artist_profiles ap" in sql and "LEFT JOIN app.artist_moderation_overrides" in sql:
+            all_rows = [
+                {"artist_name": "Visible Artist", "is_hidden": False},
+                {"artist_name": "Latest Work", "is_hidden": True},
+            ]
             include_hidden = "COALESCE(amo.is_hidden, false) = false" not in sql
-            self._rows = (
-                [
-                    {"artist_name": "Visible Artist", "is_hidden": False},
-                    {"artist_name": "Latest Work", "is_hidden": True},
-                ]
-                if include_hidden
-                else [{"artist_name": "Visible Artist", "is_hidden": False}]
-            )
+            rows = all_rows if include_hidden else [row for row in all_rows if not row["is_hidden"]]
+            if params and any(isinstance(param, str) and "Latest Work" in param for param in params):
+                rows = [row for row in rows if row["artist_name"] == "Latest Work"]
+            self._rows = rows
 
     def fetchone(self):
         return self._row
@@ -141,3 +141,17 @@ def test_hidden_artist_default_excluded_and_include_hidden(monkeypatch):
     with_hidden = main.list_artists(limit=100, offset=0, include_hidden=True)
     assert len(visible) == 1
     assert len(with_hidden) == 2
+
+
+def test_hidden_artist_search_behavior(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    hidden_excluded = main.list_artists(
+        limit=100, offset=0, search="Latest Work", include_hidden=False
+    )
+    hidden_included = main.list_artists(
+        limit=100, offset=0, search="Latest Work", include_hidden=True
+    )
+    assert hidden_excluded == []
+    assert len(hidden_included) == 1
+    assert hidden_included[0]["artist_name"] == "Latest Work"
+    assert hidden_included[0]["is_hidden"] is True
