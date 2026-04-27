@@ -16,6 +16,7 @@ x-airflow-common: &airflow-common
     ARTIO_POSTGRES_DB: artio
     ARTIO_POSTGRES_USER: artio
     ARTIO_POSTGRES_PASSWORD: artio
+    PYTHONPATH: /opt/artio
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
