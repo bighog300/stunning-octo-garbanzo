@@ -51,6 +51,15 @@ class ArtistModerationPayload(BaseModel):
     updated_by: str | None = "artio_admin"
 
 
+class EventModerationPayload(BaseModel):
+    is_hidden: bool | None = None
+    is_approved: bool | None = None
+    canonical_event_title: str | None = None
+    event_type: str | None = None
+    moderation_reason: str | None = None
+    moderator_notes: str | None = None
+
+
 app = FastAPI(title="Artio API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -673,6 +682,191 @@ def list_artists(
     except Exception as exc:
         logger.exception("Failed to list artists")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/admin/events")
+def list_admin_events(
+    limit: int = Query(default=100, ge=1),
+    offset: int = Query(default=0, ge=0),
+    moderation_status: str = Query(default="all"),
+    event_type: str | None = None,
+    source_domain: str | None = None,
+    missing_date: bool = False,
+    missing_venue: bool = False,
+    search: str | None = None,
+    include_hidden: bool = True,
+) -> list[dict[str, Any]]:
+    safe_limit = max(1, min(limit, 500))
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    allowed_statuses = {"all", "unmoderated", "approved", "hidden"}
+    if moderation_status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail="Invalid moderation_status")
+
+    if moderation_status == "unmoderated":
+        where_clauses.append("moderation_override_exists = false")
+    elif moderation_status == "approved":
+        where_clauses.append("is_approved = true")
+    elif moderation_status == "hidden":
+        where_clauses.append("is_hidden = true")
+
+    if not include_hidden:
+        where_clauses.append("is_hidden = false")
+    if event_type:
+        where_clauses.append("event_type = %s")
+        params.append(event_type)
+    if source_domain:
+        where_clauses.append("source_domain = %s")
+        params.append(source_domain)
+    if missing_date:
+        where_clauses.append("start_date IS NULL AND end_date IS NULL")
+    if missing_venue:
+        where_clauses.append("(venue_name IS NULL OR btrim(venue_name) = '')")
+    if search:
+        where_clauses.append(
+            "(event_title ILIKE %s OR canonical_event_title ILIKE %s OR source_url ILIKE %s)"
+        )
+        params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.extend([safe_limit, offset])
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT event_id, event_title, original_event_title, canonical_event_title,
+                       event_type, original_event_type, linked_artists, venue_name, city, country,
+                       start_date, end_date, source_name, source_domain, source_url, crawl_timestamp,
+                       is_hidden, is_approved, moderation_override_exists, moderation_reason, updated_at
+                FROM app.event_records
+                {where_sql}
+                ORDER BY crawl_timestamp DESC NULLS LAST, created_at DESC NULLS LAST
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+    return _serialize_rows(rows)
+
+
+@app.get("/api/admin/events/{event_id}")
+def get_admin_event(event_id: str) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT *
+                FROM app.event_records
+                WHERE event_id = %s::uuid
+                LIMIT 1
+                """,
+                (event_id,),
+            )
+            event_row = cur.fetchone()
+            if not event_row:
+                raise HTTPException(status_code=404, detail="Event not found")
+
+            cur.execute(
+                """
+                SELECT artist_activity_id, artist_name, artist_name_normalized, artist_profile_url,
+                       match_type, event_type, event_title, city, country, start_date, end_date,
+                       source_domain, source_url, crawl_timestamp
+                FROM app.artist_event_links
+                WHERE event_id = %s::uuid
+                ORDER BY artist_name ASC NULLS LAST
+                """,
+                (event_id,),
+            )
+            linked_artists = cur.fetchall()
+    return {"event": _serialize_row(event_row), "linked_artists": _serialize_rows(linked_artists)}
+
+
+@app.patch("/api/admin/events/{event_id}/moderation")
+def patch_admin_event_moderation(event_id: str, payload: EventModerationPayload) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM app.event_records WHERE event_id = %s::uuid LIMIT 1",
+                (event_id,),
+            )
+            exists = cur.fetchone()
+            if not exists:
+                raise HTTPException(status_code=404, detail="Event not found")
+
+            cur.execute(
+                """
+                SELECT is_hidden, is_approved, canonical_event_title, event_type,
+                       moderation_reason, moderator_notes
+                FROM app.event_moderation_overrides
+                WHERE event_id = %s::uuid
+                LIMIT 1
+                """,
+                (event_id,),
+            )
+            current = cur.fetchone() or {}
+
+            next_hidden = (
+                payload.is_hidden if payload.is_hidden is not None else current.get("is_hidden", False)
+            )
+            next_approved = (
+                payload.is_approved
+                if payload.is_approved is not None
+                else current.get("is_approved", False)
+            )
+            next_title = (
+                payload.canonical_event_title
+                if payload.canonical_event_title is not None
+                else current.get("canonical_event_title")
+            )
+            next_type = payload.event_type if payload.event_type is not None else current.get("event_type")
+            next_reason = (
+                payload.moderation_reason
+                if payload.moderation_reason is not None
+                else current.get("moderation_reason")
+            )
+            next_notes = (
+                payload.moderator_notes
+                if payload.moderator_notes is not None
+                else current.get("moderator_notes")
+            )
+
+            cur.execute(
+                """
+                INSERT INTO app.event_moderation_overrides (
+                    event_id, is_hidden, is_approved, canonical_event_title, event_type,
+                    moderation_reason, moderator_notes, updated_at
+                )
+                VALUES (
+                    %s::uuid, %s, %s, NULLIF(%s, ''),
+                    NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), now()
+                )
+                ON CONFLICT (event_id)
+                DO UPDATE SET
+                    is_hidden = EXCLUDED.is_hidden,
+                    is_approved = EXCLUDED.is_approved,
+                    canonical_event_title = EXCLUDED.canonical_event_title,
+                    event_type = EXCLUDED.event_type,
+                    moderation_reason = EXCLUDED.moderation_reason,
+                    moderator_notes = EXCLUDED.moderator_notes,
+                    updated_at = now()
+                RETURNING event_id, is_hidden, is_approved, canonical_event_title, event_type,
+                          moderation_reason, moderator_notes, updated_at
+                """,
+                (
+                    event_id,
+                    next_hidden,
+                    next_approved,
+                    next_title,
+                    next_type,
+                    next_reason,
+                    next_notes,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+    return {"status": "updated", "event_moderation": _serialize_row(row)}
 
 
 @app.get("/api/review-queue")

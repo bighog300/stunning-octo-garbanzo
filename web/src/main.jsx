@@ -96,6 +96,26 @@ function rejectArtwork(artworkId, payload) {
   })
 }
 
+function getAdminEvents(filters = {}) {
+  const params = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    params.set(key, String(value))
+  })
+  return api(`/api/admin/events?${params.toString()}`)
+}
+
+function getAdminEvent(eventId) {
+  return api(`/api/admin/events/${encodeURIComponent(eventId)}`)
+}
+
+function patchEventModeration(eventId, payload) {
+  return api(`/api/admin/events/${encodeURIComponent(eventId)}/moderation`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
 function useFetch(path) {
   const [data, setData] = React.useState([])
   const [loading, setLoading] = React.useState(true)
@@ -123,6 +143,7 @@ function Nav() {
       <Link to="/">Artworks</Link>
       <Link to="/artists">Artists</Link>
       <Link to="/moderation">Moderation</Link>
+      <Link to="/admin/events">Events</Link>
     </nav>
   )
 }
@@ -718,6 +739,197 @@ function ArtworkDetailPage() {
   )
 }
 
+function AdminEventsPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [events, setEvents] = React.useState([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState('')
+
+  const filters = React.useMemo(() => ({
+    moderation_status: searchParams.get('moderation_status') || 'all',
+    event_type: searchParams.get('event_type') || '',
+    source_domain: searchParams.get('source_domain') || '',
+    missing_date: searchParams.get('missing_date') === 'true',
+    missing_venue: searchParams.get('missing_venue') === 'true',
+    include_hidden: searchParams.get('include_hidden') !== 'false',
+    search: searchParams.get('search') || '',
+    limit: 100,
+    offset: 0,
+  }), [searchParams])
+
+  React.useEffect(() => {
+    let mounted = true
+    setLoading(true)
+    setError('')
+    getAdminEvents(filters)
+      .then((json) => mounted && setEvents(Array.isArray(json) ? json : []))
+      .catch((err) => mounted && setError(err.message))
+      .finally(() => mounted && setLoading(false))
+    return () => { mounted = false }
+  }, [filters])
+
+  function updateFilter(key, value) {
+    const next = new URLSearchParams(searchParams)
+    if (value === '' || value === null) next.delete(key)
+    else next.set(key, String(value))
+    setSearchParams(next)
+  }
+
+  return (
+    <section>
+      <h2>Events moderation</h2>
+      <div className="controls">
+        <input
+          type="search"
+          placeholder="Search title or source URL"
+          value={filters.search}
+          onChange={(e) => updateFilter('search', e.target.value)}
+        />
+        <select value={filters.moderation_status} onChange={(e) => updateFilter('moderation_status', e.target.value)}>
+          <option value="all">All moderation states</option>
+          <option value="unmoderated">Unmoderated</option>
+          <option value="approved">Approved</option>
+          <option value="hidden">Hidden</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Event type"
+          value={filters.event_type}
+          onChange={(e) => updateFilter('event_type', e.target.value)}
+        />
+        <input
+          type="text"
+          placeholder="Source domain"
+          value={filters.source_domain}
+          onChange={(e) => updateFilter('source_domain', e.target.value)}
+        />
+        <label><input type="checkbox" checked={filters.missing_date} onChange={(e) => updateFilter('missing_date', e.target.checked)} /> Missing date</label>
+        <label><input type="checkbox" checked={filters.missing_venue} onChange={(e) => updateFilter('missing_venue', e.target.checked)} /> Missing venue</label>
+        <label><input type="checkbox" checked={filters.include_hidden} onChange={(e) => updateFilter('include_hidden', e.target.checked)} /> Show hidden</label>
+      </div>
+      {loading && <p>Loading events…</p>}
+      {error && <p className="error-text">Failed to load events: {error}</p>}
+      {!loading && !error && (
+        <table>
+          <thead>
+            <tr>
+              <th>Title</th><th>Type</th><th>Artists</th><th>Venue</th><th>City</th><th>Dates</th><th>Source</th><th>Crawl</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {events.map((event) => (
+              <tr key={event.event_id}>
+                <td><Link to={`/admin/events/${event.event_id}`}>{event.event_title || event.original_event_title || 'Untitled event'}</Link></td>
+                <td>{event.event_type || 'Unknown'}</td>
+                <td>{Array.isArray(event.linked_artists) && event.linked_artists.length > 0 ? event.linked_artists.join(', ') : '—'}</td>
+                <td>{event.venue_name || 'Missing venue'}</td>
+                <td>{event.city || '—'}</td>
+                <td>{event.start_date || 'Missing'}{event.end_date ? ` → ${event.end_date}` : ''}</td>
+                <td>{event.source_domain || event.source_name}</td>
+                <td>{event.crawl_timestamp || '—'}</td>
+                <td>{event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+}
+
+function AdminEventDetailPage() {
+  const { eventId = '' } = useParams()
+  const [detail, setDetail] = React.useState(null)
+  const [error, setError] = React.useState('')
+  const [loading, setLoading] = React.useState(true)
+  const [saveStatus, setSaveStatus] = React.useState('')
+
+  const loadEvent = React.useCallback(() => {
+    setLoading(true)
+    setError('')
+    getAdminEvent(eventId)
+      .then(setDetail)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [eventId])
+
+  React.useEffect(() => { loadEvent() }, [loadEvent])
+
+  async function updateModeration(changes) {
+    try {
+      setSaveStatus('')
+      await patchEventModeration(eventId, changes)
+      setSaveStatus('Moderation saved.')
+      loadEvent()
+    } catch (err) {
+      setSaveStatus(`Failed to save moderation: ${err.message}`)
+    }
+  }
+
+  if (loading) return <section><h2>Event detail</h2><p>Loading…</p></section>
+  if (error || !detail?.event) return <section><h2>Event detail</h2><p className="error-text">{error || 'Not found'}</p></section>
+
+  const event = detail.event
+  const linkedArtists = detail.linked_artists || []
+
+  return (
+    <section>
+      <p><Link to="/admin/events">← Back to events</Link></p>
+      <h2>{event.event_title || 'Untitled event'}</h2>
+      <p><strong>Type:</strong> {event.event_type || 'Unknown'}</p>
+      <p><strong>Venue:</strong> {event.venue_name || 'Missing venue'}</p>
+      <p><strong>City/Country:</strong> {[event.city, event.country].filter(Boolean).join(', ') || '—'}</p>
+      <p><strong>Dates:</strong> {event.start_date || 'Missing'}{event.end_date ? ` → ${event.end_date}` : ''}</p>
+      {event.source_url && <p><a href={event.source_url} target="_blank" rel="noreferrer">Source URL</a></p>}
+      <p><strong>Status:</strong> {event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'}</p>
+
+      <h3>Linked artists</h3>
+      {linkedArtists.length === 0 ? <p>No linked artists.</p> : (
+        <ul>
+          {linkedArtists.map((artist) => (
+            <li key={artist.artist_activity_id || `${artist.artist_name}-${artist.source_url}`}>
+              {artist.artist_name || 'Unknown artist'}
+              {artist.artist_profile_url ? <> — <a href={artist.artist_profile_url} target="_blank" rel="noreferrer">Profile</a></> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <h3>Moderation controls</h3>
+      <div className="action-row">
+        <button onClick={() => updateModeration({ is_approved: !event.is_approved })}>
+          {event.is_approved ? 'Unapprove' : 'Approve'}
+        </button>
+        <button onClick={() => updateModeration({ is_hidden: !event.is_hidden })}>
+          {event.is_hidden ? 'Unhide' : 'Hide'}
+        </button>
+        <button onClick={() => {
+          const canonical = window.prompt('Canonical event title', event.canonical_event_title || event.event_title || '')
+          if (canonical !== null) updateModeration({ canonical_event_title: canonical })
+        }}>Set canonical title</button>
+        <button onClick={() => {
+          const eventType = window.prompt('Event type override', event.event_type || '')
+          if (eventType !== null) updateModeration({ event_type: eventType })
+        }}>Set event type</button>
+      </div>
+      <div className="controls">
+        <button onClick={() => {
+          const reason = window.prompt('Moderation reason', event.moderation_reason || '')
+          if (reason !== null) updateModeration({ moderation_reason: reason })
+        }}>Edit reason</button>
+        <button onClick={() => {
+          const notes = window.prompt('Moderator notes', event.moderator_notes || '')
+          if (notes !== null) updateModeration({ moderator_notes: notes })
+        }}>Edit notes</button>
+      </div>
+      {saveStatus && <p className={saveStatus.startsWith('Failed') ? 'error-text' : ''}>{saveStatus}</p>}
+
+      <h3>Raw metadata</h3>
+      <pre>{JSON.stringify(event.raw_payload || {}, null, 2)}</pre>
+    </section>
+  )
+}
+
 function App() {
   return (
     <div className="app">
@@ -728,6 +940,8 @@ function App() {
         <Route path="/artists" element={<ArtistListPage />} />
         <Route path="/artists/:artistName" element={<ArtistProfilePage />} />
         <Route path="/moderation" element={<ModerationPage />} />
+        <Route path="/admin/events" element={<AdminEventsPage />} />
+        <Route path="/admin/events/:eventId" element={<AdminEventDetailPage />} />
         <Route path="/artworks/:artworkId" element={<ArtworkDetailPage />} />
       </Routes>
     </div>
