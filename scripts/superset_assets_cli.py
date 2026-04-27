@@ -18,6 +18,8 @@ DEFAULT_ASSET_PATH = Path("superset/assets/artio_dashboards.zip")
 DEFAULT_SUPERSET_URL = "http://localhost:8088"
 DEFAULT_SUPERSET_USERNAME = "admin"
 DEFAULT_SUPERSET_PASSWORD = "admin"
+DEFAULT_BOOTSTRAP_SCRIPT = Path("superset/bootstrap_artio_dashboard.py")
+DEFAULT_ARTIST_PROFILE_BOOTSTRAP_SCRIPT = Path("superset/bootstrap_artist_profile_dashboard.py")
 
 
 class CliError(RuntimeError):
@@ -50,6 +52,17 @@ def run_superset_shell(script: str) -> None:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "unknown error"
         raise CliError(f"Superset command failed:\n{detail}")
+
+
+def copy_file_to_superset(local_path: Path, remote_path: Path) -> None:
+    if not local_path.exists():
+        raise CliError(f"Local file not found: {local_path}")
+
+    ensure_superset_running()
+    copy_result = run_command(["docker", "compose", "cp", str(local_path), f"superset:{remote_path}"])
+    if copy_result.returncode != 0:
+        detail = copy_result.stderr.strip() or copy_result.stdout.strip() or "unknown copy error"
+        raise CliError(f"Could not copy file into Superset container:\n{detail}")
 
 
 def _quoted(path: Path) -> str:
@@ -187,6 +200,7 @@ def list_assets(_args: argparse.Namespace) -> int:
 
 
 def bootstrap_assets(args: argparse.Namespace) -> int:
+    copy_file_to_superset(DEFAULT_BOOTSTRAP_SCRIPT, Path("/app/superset_home/bootstrap_artio_dashboard.py"))
     run_superset_shell("python /app/superset_home/bootstrap_artio_dashboard.py")
     print("Bootstrap script completed: /app/superset_home/bootstrap_artio_dashboard.py")
 
@@ -197,6 +211,16 @@ def bootstrap_assets(args: argparse.Namespace) -> int:
         return import_assets(import_args)
 
     print(f"No asset archive found at {path}; skipping import.")
+    return 0
+
+
+def bootstrap_artist_profile_assets(_args: argparse.Namespace) -> int:
+    copy_file_to_superset(
+        DEFAULT_ARTIST_PROFILE_BOOTSTRAP_SCRIPT,
+        Path("/app/superset_home/bootstrap_artist_profile_dashboard.py"),
+    )
+    run_superset_shell("python /app/superset_home/bootstrap_artist_profile_dashboard.py")
+    print("Bootstrap script completed: /app/superset_home/bootstrap_artist_profile_dashboard.py")
     return 0
 
 
@@ -223,6 +247,12 @@ def build_parser() -> argparse.ArgumentParser:
     cmd_bootstrap.add_argument("--path", default=str(DEFAULT_ASSET_PATH), help=f"Input zip path (default: {DEFAULT_ASSET_PATH})")
     cmd_bootstrap.add_argument("--overwrite", action="store_true", help="Pass --overwrite to import step if supported")
     cmd_bootstrap.set_defaults(func=bootstrap_assets)
+
+    cmd_bootstrap_artist_profile = subparsers.add_parser(
+        "bootstrap-artist-profile",
+        help="Run artist profile dashboard bootstrap script",
+    )
+    cmd_bootstrap_artist_profile.set_defaults(func=bootstrap_artist_profile_assets)
 
     return parser
 

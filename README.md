@@ -117,6 +117,7 @@ python scripts/superset_assets_cli.py export
 python scripts/superset_assets_cli.py import --overwrite
 python scripts/superset_assets_cli.py list
 python scripts/superset_assets_cli.py bootstrap --overwrite
+python scripts/superset_assets_cli.py bootstrap-artist-profile
 ```
 
 Workflow:
