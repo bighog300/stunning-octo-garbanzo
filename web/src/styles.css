@@ -59,3 +59,38 @@ button { width: fit-content; padding: 8px 12px; }
 }
 
 .event-list { display: grid; gap: 0.75rem; }
+
+.moderation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.moderation-card,
+.queue-item {
+  border: 1px solid #e4e8f0;
+  border-radius: 8px;
+  background: #fafbff;
+  padding: 10px;
+}
+
+.queue-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.issue-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #e8edff;
+  color: #243b7a;
+  font-size: 12px;
+}
+
+.flag-form {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+}

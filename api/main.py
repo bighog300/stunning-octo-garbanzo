@@ -8,7 +8,7 @@ import logging
 import psycopg
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ReviewActionPayload(BaseModel):
@@ -23,6 +23,15 @@ class ArtistBioEditPayload(BaseModel):
     edited_by: str | None = "artio_admin"
     edit_notes: str | None = None
     source_domain: str = "art.co.za"
+
+
+class DataQualityFlagPayload(BaseModel):
+    entity_type: str
+    entity_id: str | None = None
+    artist_name: str | None = None
+    issue_type: str = Field(min_length=1)
+    notes: str | None = None
+    created_by: str | None = "artio_admin"
 
 
 app = FastAPI(title="Artio API", version="0.1.0")
@@ -114,6 +123,45 @@ def _select_with_fallback(
     return ", ".join(selected_parts), selected_aliases
 
 
+QUEUE_SUMMARY_KEYS = [
+    "artworks_pending_review",
+    "artists_missing_bio",
+    "artists_short_bio",
+    "artists_suspect_name",
+    "artists_with_manual_bio",
+    "artists_without_events",
+    "broken_or_missing_images",
+]
+
+SUSPECT_NAME_PATTERNS = [
+    "%selected works%",
+    "%latest work%",
+    "%artworks%",
+    "%paintings%",
+    "%prints%",
+    "%about the artist%",
+]
+
+
+def _queue_reason_sql(queue_name: str) -> str:
+    mapping = {
+        "artworks-pending-review": "'pending_review'",
+        "artists-missing-bio": "'missing_bio'",
+        "artists-short-bio": "'short_bio'",
+        "artists-suspect-name": "'suspect_artist_name'",
+        "artists-with-manual-bio": "'manual_bio_override'",
+        "artists-without-events": "'missing_events'",
+        "broken-or-missing-images": "'broken_or_missing_image'",
+    }
+    if queue_name not in mapping:
+        raise HTTPException(status_code=404, detail="Unsupported queue name")
+    return mapping[queue_name]
+
+
+def _safe_limit(limit: int) -> int:
+    return max(1, min(limit, 500))
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     with get_conn() as conn:
@@ -121,6 +169,237 @@ def health() -> dict[str, str]:
             cur.execute("SELECT 1")
             cur.fetchone()
     return {"status": "ok"}
+
+
+@app.get("/api/moderation/queues")
+def moderation_queue_summary() -> dict[str, int]:
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      COUNT(*) FILTER (WHERE COALESCE(review_status, 'pending') = 'pending') AS artworks_pending_review,
+                      COUNT(*) FILTER (WHERE image_url IS NULL OR btrim(image_url) = '') AS broken_or_missing_images
+                    FROM app.artwork_records
+                    """
+                )
+                artwork_counts = cur.fetchone() or {}
+
+                cur.execute(
+                    """
+                    SELECT
+                      COUNT(*) FILTER (WHERE artist_bio IS NULL OR btrim(artist_bio) = '') AS artists_missing_bio,
+                      COUNT(*) FILTER (
+                        WHERE artist_bio IS NOT NULL
+                          AND btrim(artist_bio) <> ''
+                          AND length(btrim(artist_bio)) < 120
+                      ) AS artists_short_bio,
+                      COUNT(*) FILTER (
+                        WHERE artist_name ILIKE %s
+                           OR artist_name ILIKE %s
+                           OR artist_name ILIKE %s
+                           OR artist_name ILIKE %s
+                           OR artist_name ILIKE %s
+                           OR artist_name ILIKE %s
+                      ) AS artists_suspect_name,
+                      COUNT(*) FILTER (WHERE edited_artist_bio IS NOT NULL) AS artists_with_manual_bio
+                    FROM app.artist_profiles
+                    """,
+                    tuple(SUSPECT_NAME_PATTERNS),
+                )
+                artist_counts = cur.fetchone() or {}
+
+                artists_without_events = 0
+                if _relation_exists(conn, "app", "artist_event_links"):
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS artists_without_events
+                        FROM app.artist_profiles ap
+                        WHERE NOT EXISTS (
+                          SELECT 1
+                          FROM app.artist_event_links ael
+                          WHERE ael.artist_name = ap.artist_name
+                        )
+                        """
+                    )
+                    row = cur.fetchone() or {}
+                    artists_without_events = row.get("artists_without_events", 0) or 0
+        return {
+            "artworks_pending_review": artwork_counts.get("artworks_pending_review", 0) or 0,
+            "artists_missing_bio": artist_counts.get("artists_missing_bio", 0) or 0,
+            "artists_short_bio": artist_counts.get("artists_short_bio", 0) or 0,
+            "artists_suspect_name": artist_counts.get("artists_suspect_name", 0) or 0,
+            "artists_with_manual_bio": artist_counts.get("artists_with_manual_bio", 0) or 0,
+            "artists_without_events": artists_without_events,
+            "broken_or_missing_images": artwork_counts.get("broken_or_missing_images", 0) or 0,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to fetch moderation queue summary")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/api/moderation/queue/{queue_name}")
+def moderation_queue_records(
+    queue_name: str,
+    limit: int = Query(default=100, ge=1),
+    offset: int = Query(default=0, ge=0),
+) -> list[dict[str, Any]]:
+    safe_limit = _safe_limit(limit)
+    issue_reason = _queue_reason_sql(queue_name)
+
+    artist_queue_where = {
+        "artists-missing-bio": "artist_bio IS NULL OR btrim(artist_bio) = ''",
+        "artists-short-bio": (
+            "artist_bio IS NOT NULL AND btrim(artist_bio) <> '' AND length(btrim(artist_bio)) < 120"
+        ),
+        "artists-suspect-name": (
+            "artist_name ILIKE %s OR artist_name ILIKE %s OR artist_name ILIKE %s "
+            "OR artist_name ILIKE %s OR artist_name ILIKE %s OR artist_name ILIKE %s"
+        ),
+        "artists-with-manual-bio": "edited_artist_bio IS NOT NULL",
+    }
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                if queue_name in artist_queue_where:
+                    params: list[Any] = []
+                    if queue_name == "artists-suspect-name":
+                        params.extend(SUSPECT_NAME_PATTERNS)
+                    params.extend([safe_limit, offset])
+                    cur.execute(
+                        f"""
+                        SELECT artist_name, source_domain, profile_url, artist_bio, original_artist_bio,
+                               edited_artist_bio AS edited_bio, bio_edited_by AS edited_by,
+                               bio_last_edited_at AS edited_at, artwork_count, last_seen,
+                               {issue_reason} AS issue_reason
+                        FROM app.artist_profiles
+                        WHERE {artist_queue_where[queue_name]}
+                        ORDER BY last_seen DESC NULLS LAST, artist_name ASC
+                        LIMIT %s OFFSET %s
+                        """,
+                        tuple(params),
+                    )
+                    return _serialize_rows(cur.fetchall())
+
+                if queue_name == "artists-without-events":
+                    if not _relation_exists(conn, "app", "artist_event_links"):
+                        return []
+                    cur.execute(
+                        f"""
+                        SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.artist_bio,
+                               ap.original_artist_bio, ap.edited_artist_bio AS edited_bio,
+                               ap.bio_edited_by AS edited_by, ap.bio_last_edited_at AS edited_at,
+                               ap.artwork_count, ap.last_seen, {issue_reason} AS issue_reason
+                        FROM app.artist_profiles ap
+                        WHERE NOT EXISTS (
+                          SELECT 1
+                          FROM app.artist_event_links ael
+                          WHERE ael.artist_name = ap.artist_name
+                        )
+                        ORDER BY ap.last_seen DESC NULLS LAST, ap.artist_name ASC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (safe_limit, offset),
+                    )
+                    return _serialize_rows(cur.fetchall())
+
+                if queue_name == "artworks-pending-review":
+                    cur.execute(
+                        f"""
+                        SELECT artwork_id, artwork_title, artist_name, image_url, source_url,
+                               review_status, public_visibility, quality_score,
+                               {issue_reason} AS issue_reason
+                        FROM app.artwork_records
+                        WHERE COALESCE(review_status, 'pending') = 'pending'
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (safe_limit, offset),
+                    )
+                    return _serialize_rows(cur.fetchall())
+
+                if queue_name == "broken-or-missing-images":
+                    cur.execute(
+                        f"""
+                        SELECT artwork_id, artwork_title, artist_name, image_url, source_url,
+                               review_status, public_visibility, quality_score,
+                               {issue_reason} AS issue_reason
+                        FROM app.artwork_records
+                        WHERE image_url IS NULL OR btrim(image_url) = ''
+                        ORDER BY created_at DESC
+                        LIMIT %s OFFSET %s
+                        """,
+                        (safe_limit, offset),
+                    )
+                    return _serialize_rows(cur.fetchall())
+
+        raise HTTPException(status_code=404, detail="Unsupported queue name")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to fetch moderation queue records for %s", queue_name)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/moderation/flags")
+def create_data_quality_flag(payload: DataQualityFlagPayload) -> dict[str, Any]:
+    allowed_entity_types = {"artist", "artwork", "event"}
+    if payload.entity_type not in allowed_entity_types:
+        raise HTTPException(status_code=400, detail="entity_type must be one of artist/artwork/event")
+    if not payload.issue_type.strip():
+        raise HTTPException(status_code=400, detail="issue_type cannot be blank")
+    if not (payload.entity_id or payload.artist_name):
+        raise HTTPException(status_code=400, detail="Provide at least one of entity_id or artist_name")
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS app.data_quality_flags (
+                      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                      entity_type text NOT NULL,
+                      entity_id text,
+                      artist_name text,
+                      issue_type text NOT NULL,
+                      notes text,
+                      status text NOT NULL DEFAULT 'open',
+                      created_by text,
+                      created_at timestamptz DEFAULT now(),
+                      resolved_at timestamptz
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO app.data_quality_flags (
+                      entity_type, entity_id, artist_name, issue_type, notes, created_by
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                    RETURNING id, entity_type, entity_id, artist_name, issue_type, notes,
+                              status, created_by, created_at, resolved_at
+                    """,
+                    (
+                        payload.entity_type,
+                        payload.entity_id,
+                        payload.artist_name,
+                        payload.issue_type.strip(),
+                        payload.notes,
+                        payload.created_by,
+                    ),
+                )
+                row = cur.fetchone()
+            conn.commit()
+        return {"status": "created", "flag": _serialize_row(row)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to create data quality flag")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/artworks")
