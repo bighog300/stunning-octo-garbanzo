@@ -141,6 +141,54 @@ def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     assert item["source_domain"] == "art.co.za"
 
 
+def test_artist_bio_is_extracted_and_written_to_description_and_raw_payload() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/jane-doe/",
+        """
+        <html><body>
+          <h1>Jane Doe</h1>
+          <h2>About</h2>
+          <p>Jane Doe is a Cape Town painter working in oil and charcoal.</p>
+          <h2>Artist Statement</h2>
+          <p>Her practice explores memory and migration through layered marks.</p>
+          <h2>Recent Work</h2>
+          <p>Recent Work</p>
+          <img src="/jane-doe/work-a.jpg" alt="Work A" />
+          <a href="/jane-doe/artworks/">View artworks</a>
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+    requests = [obj for obj in outputs if isinstance(obj, Request)]
+
+    assert items
+    assert "Cape Town painter" in items[0]["description"]
+    assert "artist_bio" in items[0]["raw_payload"]
+    assert "artist_statement" in items[0]["raw_payload"]
+    assert "profile_text_blocks" in items[0]["raw_payload"]
+    assert "Recent Work" not in items[0]["description"]
+
+    section_response = _html_response(
+        requests[0].url,
+        """
+        <html><body>
+          <article>
+            <img src="/jane-doe/work-b.jpg" alt="Work B" />
+          </article>
+        </body></html>
+        """,
+    )
+    section_response.meta.update(requests[0].meta)
+
+    section_items = [obj for obj in spider.parse_artwork_section(section_response) if not isinstance(obj, Request)]
+    assert section_items
+    assert "Cape Town painter" in section_items[0]["description"]
+    assert section_items[0]["raw_payload"]["artist_profile_url"] == "https://www.art.co.za/jane-doe/"
+
+
 def test_bad_artist_links_and_schemes_are_excluded() -> None:
     spider = ArtCoZaSpider(max_artists=10)
     response = _html_response(
