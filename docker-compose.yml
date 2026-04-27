@@ -105,8 +105,10 @@ services:
       ARTIO_POSTGRES_DB: artio
       ARTIO_POSTGRES_USER: artio
       ARTIO_POSTGRES_PASSWORD: artio
+      PYTHONPATH: /opt/artio
     volumes:
       - ./crawlers:/opt/artio/crawlers
+      - ./scraper:/opt/artio/scraper
     working_dir: /opt/artio/crawlers
     command: tail -f /dev/null
     depends_on:
