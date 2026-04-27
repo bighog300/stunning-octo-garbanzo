@@ -5,13 +5,23 @@
 CREATE OR REPLACE VIEW app.artwork_records AS
 SELECT
     NULL::UUID AS artwork_id,
+    NULL::TEXT AS raw_artwork_id,
+    NULL::UUID AS artist_id,
     NULL::TEXT AS artist_name,
+    NULL::TEXT AS original_artist_name,
+    NULL::BOOLEAN AS artist_is_hidden,
+    NULL::TEXT AS canonical_artist_name,
+    NULL::TEXT AS artist_moderation_reason,
     NULL::TEXT AS artwork_title,
     NULL::INTEGER AS year_start,
     NULL::INTEGER AS year_end,
+    NULL::TEXT AS artwork_date_text,
     NULL::TEXT AS medium_text,
     NULL::TEXT AS medium_category,
     NULL::TEXT AS dimensions_text,
+    NULL::NUMERIC AS height_cm,
+    NULL::NUMERIC AS width_cm,
+    NULL::NUMERIC AS depth_cm,
     NULL::TEXT AS price_text,
     NULL::NUMERIC AS price_numeric,
     NULL::TEXT AS currency_code,
@@ -22,9 +32,18 @@ SELECT
     NULL::TEXT AS thumbnail_url,
     NULL::TEXT AS description,
     NULL::INTEGER AS quality_score,
+    NULL::TEXT AS duplicate_group_key,
+    NULL::BOOLEAN AS is_duplicate_candidate,
     NULL::TEXT AS review_status,
+    NULL::TIMESTAMPTZ AS reviewed_at,
+    NULL::TEXT AS reviewed_by,
+    NULL::TEXT AS review_notes,
     NULL::BOOLEAN AS public_visibility,
-    NULL::TIMESTAMPTZ AS crawl_timestamp
+    NULL::TIMESTAMPTZ AS approved_at,
+    NULL::TEXT AS approved_by,
+    NULL::TEXT AS approval_notes,
+    NULL::TIMESTAMPTZ AS crawl_timestamp,
+    NULL::TIMESTAMPTZ AS created_at
 WHERE false;
 
 CREATE OR REPLACE VIEW app.event_records AS
