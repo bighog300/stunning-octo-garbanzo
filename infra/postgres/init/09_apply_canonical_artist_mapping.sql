@@ -12,7 +12,24 @@ DROP VIEW IF EXISTS app.artist_event_links CASCADE;
 DROP VIEW IF EXISTS app.artwork_records CASCADE;
 
 CREATE VIEW app.artwork_records AS
-WITH latest_review AS (
+WITH latest_artwork AS (
+    -- Latest-crawl wins when multiple raw rows share a source_record_id.
+    -- For NULL source_record_id values, keep each raw row by partitioning on raw_artwork_id.
+    SELECT ranked.*
+    FROM (
+        SELECT
+            m.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY COALESCE(r.source_record_id, m.raw_artwork_id::text)
+                ORDER BY m.crawl_timestamp DESC NULLS LAST, r.id DESC
+            ) AS dedupe_rank
+        FROM analytics.mart_artworks m
+        LEFT JOIN raw.artworks r
+            ON r.id = m.raw_artwork_id
+    ) ranked
+    WHERE ranked.dedupe_rank = 1
+),
+latest_review AS (
     SELECT DISTINCT ON (artwork_id)
         artwork_id,
         review_status,
@@ -75,7 +92,7 @@ SELECT
     amo.reason AS artist_moderation_reason,
     amo.updated_by AS artist_moderation_updated_by,
     amo.updated_at AS artist_moderation_updated_at
-FROM analytics.mart_artworks m
+FROM latest_artwork m
 LEFT JOIN app.artist_moderation_overrides amo
     ON amo.artist_name = m.artist_name
    AND amo.source_domain = m.source_domain
