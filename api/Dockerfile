@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r /opt/artio/api/requirements.txt
 
 COPY api /opt/artio/api
 COPY artio_cli /opt/artio/artio_cli
+COPY scraper /opt/artio/scraper
 
 WORKDIR /opt/artio/api
 

@@ -181,6 +181,7 @@ services:
       ARTIO_POSTGRES_PASSWORD: artio
       PYTHONPATH: /opt/artio
     volumes:
+      - ./scraper:/opt/artio/scraper
       - ./reports/tmp:/opt/artio/reports/tmp
     ports:
       - "8000:8000"
