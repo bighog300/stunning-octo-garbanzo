@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from typing import Any
 
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -50,6 +50,43 @@ def _get_artwork_or_404(conn: psycopg.Connection, artwork_id: str) -> dict[str, 
     return row
 
 
+def _relation_columns(conn: psycopg.Connection, schema: str, relation: str) -> set[str]:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = %s
+              AND table_name = %s
+            """,
+            (schema, relation),
+        )
+        rows = cur.fetchall()
+    return {row["column_name"] for row in rows}
+
+
+def _relation_exists(conn: psycopg.Connection, schema: str, relation: str) -> bool:
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass(%s) AS relation_name", (f"{schema}.{relation}",))
+        row = cur.fetchone()
+    return bool(row and row["relation_name"])
+
+
+def _select_with_fallback(
+    columns: set[str], preferred: list[tuple[str, str]]
+) -> tuple[str, list[str]]:
+    selected_parts: list[str] = []
+    selected_aliases: list[str] = []
+    for alias, fallback in preferred:
+        if alias in columns:
+            selected_parts.append(alias)
+            selected_aliases.append(alias)
+        elif fallback in columns:
+            selected_parts.append(f"{fallback} AS {alias}")
+            selected_aliases.append(alias)
+    return ", ".join(selected_parts), selected_aliases
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     with get_conn() as conn:
@@ -75,6 +112,124 @@ def list_artworks(limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
             )
             rows = cur.fetchall()
     return rows
+
+
+@app.get("/api/artists")
+def list_artists(
+    limit: int = Query(default=100, ge=0),
+    offset: int = Query(default=0, ge=0),
+    search: str | None = None,
+    source_domain: str | None = None,
+) -> list[dict[str, Any]]:
+    safe_limit = min(limit, 500)
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    if search:
+        where_clauses.append("artist_name ILIKE %s")
+        params.append(f"%{search}%")
+    if source_domain:
+        where_clauses.append("source_domain = %s")
+        params.append(source_domain)
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.extend([safe_limit, offset])
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT artist_name, source_domain, profile_url, artist_bio, artwork_count, last_seen
+                FROM app.artist_profiles
+                {where_sql}
+                ORDER BY artist_name ASC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+    return rows
+
+
+@app.get("/api/artists/{artist_name:path}")
+def get_artist_profile(artist_name: str) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT artist_name, source_domain, profile_url, artist_bio, artwork_count, last_seen
+                FROM app.artist_profiles
+                WHERE artist_name = %s
+                LIMIT 1
+                """,
+                (artist_name,),
+            )
+            artist = cur.fetchone()
+
+        if not artist:
+            raise HTTPException(status_code=404, detail="Artist not found")
+
+        artwork_columns = _relation_columns(conn, "app", "artwork_records")
+        artwork_select, _ = _select_with_fallback(
+            artwork_columns,
+            [
+                ("artwork_id", "id"),
+                ("artwork_title", "title"),
+                ("image_url", "image_url"),
+                ("thumbnail_url", "thumbnail_url"),
+                ("medium_text", "medium_text"),
+                ("year_start", "year_start"),
+                ("year_end", "year_end"),
+                ("source_url", "source_url"),
+                ("review_status", "review_status"),
+                ("public_visibility", "public_visibility"),
+            ],
+        )
+        artworks: list[dict[str, Any]] = []
+        if artwork_select:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT {artwork_select}
+                    FROM app.artwork_records
+                    WHERE artist_name = %s
+                    ORDER BY artwork_title ASC NULLS LAST
+                    """,
+                    (artist_name,),
+                )
+                artworks = cur.fetchall()
+
+        events: list[dict[str, Any]] = []
+        if _relation_exists(conn, "app", "artist_event_links"):
+            event_columns = _relation_columns(conn, "app", "artist_event_links")
+            event_select, _ = _select_with_fallback(
+                event_columns,
+                [
+                    ("event_id", "id"),
+                    ("event_title", "title"),
+                    ("event_type", "event_type"),
+                    ("venue_name", "venue_name"),
+                    ("city", "city"),
+                    ("country", "country"),
+                    ("start_date", "start_date"),
+                    ("end_date", "end_date"),
+                    ("source_url", "source_url"),
+                ],
+            )
+            if event_select:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT {event_select}
+                        FROM app.artist_event_links
+                        WHERE artist_name = %s
+                        ORDER BY start_date DESC NULLS LAST, end_date DESC NULLS LAST
+                        """,
+                        (artist_name,),
+                    )
+                    events = cur.fetchall()
+
+    return {"artist": artist, "artworks": artworks, "events": events}
 
 
 @app.get("/api/artworks/{artwork_id}")
