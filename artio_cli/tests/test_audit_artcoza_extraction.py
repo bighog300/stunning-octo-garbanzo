@@ -4,6 +4,7 @@ from artio_cli.audit_artcoza_extraction import (
     _parse_records_content,
     build_changed_records,
     build_matched_metrics,
+    build_suspect_artist_names,
     match_records,
 )
 
@@ -98,3 +99,20 @@ def test_changed_record_sorting_improvements_then_regressions():
     ids = [row["source_record_id"] for row in changed]
     assert ids[0] == "a"
     assert ids[-1] == "b"
+
+
+def test_suspect_artist_names_flags_expected_patterns():
+    suspects = build_suspect_artist_names(
+        [
+            _record(artist_name="Artist Statement", source_url="https://www.art.co.za/marriannabooyens/"),
+            _record(artist_name="Hoseamatlou", source_url="https://www.art.co.za/hoseamatlou/"),
+            _record(artist_name="Summer Expo: New Voices", source_url="https://www.art.co.za/chantalcoetzee/"),
+            _record(artist_name="A" * 61, source_url="https://www.art.co.za/valid-artist/"),
+        ]
+    )
+
+    reasons = {row["reason"] for row in suspects}
+    assert "section_label_denylist" in reasons
+    assert "single_token_with_known_slug_override" in reasons
+    assert "contains_colon_exhibition_like" in reasons
+    assert "name_too_long" in reasons

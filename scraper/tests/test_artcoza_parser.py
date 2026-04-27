@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from scraper.parsers.artcoza import (
+    artist_name_from_slug,
+    clean_artist_title,
     extract_artist_bio,
     extract_artist_name,
     extract_artist_profile_context,
@@ -89,6 +91,54 @@ def test_name_extraction_works() -> None:
     name = extract_artist_name(html)
 
     assert name == "Jane Doe"
+
+
+def test_artist_name_rejects_section_labels_and_falls_back_to_slug_or_title() -> None:
+    cases = [
+        (
+            "https://www.art.co.za/marriannabooyens/",
+            "<html><head><title>Marrianna Booyens | Art.co.za</title></head><body><h1>Artist Statement</h1></body></html>",
+            "Marrianna Booyens",
+        ),
+        (
+            "https://www.art.co.za/grietvandermeulen/",
+            "<html><head><title>About Griet Van Der Meulen - South African Artists</title></head><body><h1>About Griet Van Der Meulen</h1></body></html>",
+            "Griet Van Der Meulen",
+        ),
+        (
+            "https://www.art.co.za/emmawillemse/",
+            "<html><head><title>Emma Willemse | Art.co.za</title></head><body><h1>Selected Works</h1></body></html>",
+            "Emma Willemse",
+        ),
+        (
+            "https://www.art.co.za/chantalcoetzee/",
+            "<html><head><title>Chantal Coetzee | Art.co.za</title></head><body><h1>African Queens: Restoring History</h1></body></html>",
+            "Chantal Coetzee",
+        ),
+    ]
+
+    for url, html, expected in cases:
+        assert extract_artist_name(html, url=url) == expected
+
+
+def test_artist_name_slug_overrides_for_concatenated_names() -> None:
+    expected = {
+        "https://www.art.co.za/hoseamatlou/": "Hosea Matlou",
+        "https://www.art.co.za/bastiaanvanstenis/": "Bastiaan Van Stenis",
+        "https://www.art.co.za/gunthervanderreis/": "Gunther Van Der Reis",
+        "https://www.art.co.za/collenmaswanganyi/": "Collen Maswanganyi",
+        "https://www.art.co.za/michelenigrini/": "Michele Nigrini",
+        "https://www.art.co.za/nickyliebenberg/": "Nicky Liebenberg",
+    }
+
+    for url, name in expected.items():
+        assert artist_name_from_slug(url) == name
+        html = "<html><head><title>Art.co.za</title></head><body><h1>Artist Statement</h1></body></html>"
+        assert extract_artist_name(html, url=url) == name
+
+
+def test_clean_artist_title_removes_site_noise() -> None:
+    assert clean_artist_title("About Griet Van Der Meulen - South African Artists") == "Griet Van Der Meulen"
 
 
 def test_profile_context_reports_fallback() -> None:

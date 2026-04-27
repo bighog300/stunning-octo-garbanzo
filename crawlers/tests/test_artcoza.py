@@ -112,6 +112,25 @@ def test_profile_page_extracts_visible_artwork_images() -> None:
     assert items[0]["source_domain"] == "art.co.za"
 
 
+def test_profile_uses_url_aware_artist_name_extraction() -> None:
+    spider = ArtCoZaSpider(crawl_run_id="run-xyz")
+    response = _html_response(
+        "https://www.art.co.za/hoseamatlou/",
+        """
+        <html><head><title>Art.co.za</title></head><body>
+          <h1>Artist Statement</h1>
+          <img src="/hoseamatlou/work1.jpg" alt="Work 1" />
+        </body></html>
+        """,
+    )
+
+    outputs = list(spider.parse_artist_profile(response))
+    items = [obj for obj in outputs if not isinstance(obj, Request)]
+
+    assert items
+    assert items[0]["artist_name"] == "Hosea Matlou"
+
+
 def test_artwork_item_includes_artist_name_source_url_and_image_url() -> None:
     spider = ArtCoZaSpider(crawl_run_id="run-xyz")
     response = _html_response(

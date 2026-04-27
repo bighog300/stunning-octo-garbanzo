@@ -376,12 +376,8 @@ class ArtCoZaSpider(scrapy.Spider):
         return True
 
     def _extract_artist_name(self, response: scrapy.http.Response) -> str | None:
-        parsed_name = self._clean_artist_name(extract_artist_name(response.text))
-        if self._is_valid_artist_name(parsed_name):
-            return parsed_name
-
-        slug_name = self._artist_name_from_slug(response.url)
-        return slug_name if self._is_valid_artist_name(slug_name) else None
+        parsed_name = self._clean_artist_name(extract_artist_name(response.text, url=response.url))
+        return parsed_name if self._is_valid_artist_name(parsed_name) else None
 
     def _extract_artwork_section_links(self, response: scrapy.http.Response) -> list[str]:
         section_links = response.xpath(
@@ -679,15 +675,6 @@ class ArtCoZaSpider(scrapy.Spider):
                 cleaned = cleaned[:idx].strip(" |-–—")
                 lowered = cleaned.lower()
         return cleaned.strip() or None
-
-    def _artist_name_from_slug(self, url: str) -> str | None:
-        path = urlparse(url).path.strip("/")
-        if not path:
-            return None
-        slug = path.split("/")[0]
-        if slug.lower() in self.NON_ARTIST_ROOT_PATHS:
-            return None
-        return slug.replace("-", " ").replace("_", " ").strip().title() or None
 
     def _is_valid_artist_name(self, artist_name: str | None) -> bool:
         cleaned = self._clean_artist_name(artist_name)
