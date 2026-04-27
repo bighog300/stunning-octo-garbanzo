@@ -3,10 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Link, Route, Routes, useParams } from 'react-router-dom'
 import './styles.css'
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000'
-
 async function api(path, options = {}) {
-  const res = await fetch(`${API_BASE}${path}`, {
+  const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   })
