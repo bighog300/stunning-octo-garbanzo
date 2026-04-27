@@ -109,3 +109,30 @@ def test_source_record_id_stability_uses_nom_then_slug_then_hash() -> None:
 
     assert with_nom == "art.co.za:event:exhibition:abc123"
     assert with_slug == "art.co.za:event:news:fresh-update"
+
+
+def test_url_normalization_and_filtering_rejects_html_fragments() -> None:
+    spider = ArtCoZaEventsSpider()
+    response = _html_response("https://www.art.co.za/exhibitions/", "<html><body></body></html>")
+
+    assert spider._normalize_and_validate_url(response, " /exhibitions/%3Crunning.php%3E ") is None
+    assert spider._normalize_and_validate_url(response, "mailto:info@art.co.za") is None
+    assert spider._normalize_and_validate_url(response, "/exhibitions/running.php?nom=abc123") == (
+        "https://www.art.co.za/exhibitions/running.php?nom=abc123"
+    )
+
+
+def test_irrelevant_pages_do_not_follow_links() -> None:
+    spider = ArtCoZaEventsSpider(max_records=5)
+    response = _html_response(
+        "https://www.art.co.za/exhibitions/",
+        """
+        <html><body>
+            <p>This page has no useful context.</p>
+            <a href="/exhibitions/running.php?nom=abc123">Should not follow</a>
+        </body></html>
+        """,
+    )
+
+    requests = list(spider.parse(response))
+    assert requests == []

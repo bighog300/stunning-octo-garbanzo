@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import scrapy
 
@@ -13,7 +13,7 @@ from artio_crawlers.utils.hashing import content_hash
 
 class ArtCoZaEventsSpider(scrapy.Spider):
     name = "artcoza_events"
-    allowed_domains = ["art.co.za", "www.art.co.za"]
+    allowed_domains = ["art.co.za"]
     start_urls = [
         "https://www.art.co.za/exhibitions/",
         "https://www.art.co.za/exhibitions/running.php",
@@ -27,6 +27,7 @@ class ArtCoZaEventsSpider(scrapy.Spider):
         "ROBOTSTXT_OBEY": True,
         "DOWNLOAD_DELAY": 1.5,
         "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "DEPTH_LIMIT": 3,
     }
 
     MONTH_PATTERN = r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
@@ -38,35 +39,48 @@ class ArtCoZaEventsSpider(scrapy.Spider):
         self.dry_run = str(dry_run).lower() in {"true", "1", "yes"}
         self._records_emitted = 0
         self._seen_event_urls: set[str] = set()
+        self.seen_urls: set[str] = set()
 
     def parse(self, response: scrapy.http.Response):
         if self._limit_reached():
             return
+        should_follow_links = self._should_follow_links(response)
 
         listing_cards = response.css("article, .event, .listing, .news-item, .training-item, .exhibition")
         for card in listing_cards:
             detail_href = card.css("a::attr(href)").get()
-            detail_url = response.urljoin(detail_href) if detail_href else None
+            detail_url = self._normalize_and_validate_url(response, detail_href)
             if not detail_url:
                 continue
             if detail_url in self._seen_event_urls:
+                continue
+            if not self._remember_url(detail_url):
                 continue
             self._seen_event_urls.add(detail_url)
             listing_data = self._extract_listing_card_data(response, card)
             yield response.follow(detail_url, callback=self.parse_detail, meta={"listing": listing_data})
 
+        if not should_follow_links:
+            return
+
         fallback_links = self._extract_candidate_event_links(response)
-        for detail_url in fallback_links:
+        for link in fallback_links:
             if self._limit_reached():
                 break
+            detail_url = self._normalize_and_validate_url(response, link)
+            if not detail_url:
+                continue
             if detail_url in self._seen_event_urls:
+                continue
+            if not self._remember_url(detail_url):
                 continue
             self._seen_event_urls.add(detail_url)
             yield response.follow(detail_url, callback=self.parse_detail, meta={"listing": {}})
 
         next_page = response.css("a.next::attr(href), a[rel='next']::attr(href)").get()
-        if next_page and not self._limit_reached():
-            yield response.follow(next_page, callback=self.parse)
+        next_page_url = self._normalize_and_validate_url(response, next_page) if next_page else None
+        if next_page_url and not self._limit_reached() and self._remember_url(next_page_url):
+            yield response.follow(next_page_url, callback=self.parse)
 
     def parse_detail(self, response: scrapy.http.Response):
         if self._limit_reached():
@@ -158,17 +172,70 @@ class ArtCoZaEventsSpider(scrapy.Spider):
     def _extract_candidate_event_links(self, response: scrapy.http.Response) -> list[str]:
         links = []
         for href in response.css("a::attr(href)").getall():
-            url = response.urljoin(href)
-            if not url.startswith("http"):
-                continue
-            if "art.co.za" not in url:
+            url = self._normalize_and_validate_url(response, href)
+            if not url:
                 continue
             if url.rstrip("/") == response.url.rstrip("/"):
                 continue
             path = urlparse(url).path.lower()
-            if any(token in path for token in ["exhibitions", "galleries", "training", "news", "opening", "running"]):
+            if any(token in path for token in ["exhibitions", "galleries", "opening", "running", "artist", "artists"]):
                 links.append(url)
         return list(dict.fromkeys(links))
+
+    def _should_follow_links(self, response: scrapy.http.Response) -> bool:
+        parsed = urlparse(response.url)
+        path = parsed.path.lower()
+        if "/artist" in path or "/artists" in path:
+            return True
+        page_text = " ".join(self._text_blocks(response)).lower()
+        return any(token in page_text for token in ["exhibition", "event", "gallery"])
+
+    def _remember_url(self, url: str) -> bool:
+        if url in self.seen_urls:
+            self.logger.debug("Skipping URL: %s reason=already_seen", url)
+            return False
+        self.seen_urls.add(url)
+        return True
+
+    def _normalize_and_validate_url(self, response: scrapy.http.Response, href: str | None) -> str | None:
+        if not href:
+            return None
+        raw = href.strip()
+        decoded = unquote(raw).strip()
+        absolute = response.urljoin(decoded)
+        if self._is_valid_artcoza_url(absolute):
+            return absolute
+        return None
+
+    def _is_valid_artcoza_url(self, url: str) -> bool:
+        if not url:
+            self.logger.debug("Skipping URL: %s reason=invalid_format", url)
+            return False
+        if len(url) > 200:
+            self.logger.debug("Skipping URL: %s reason=too_long", url)
+            return False
+        lowered = url.lower()
+        if "<" in url or ">" in url or "%3c" in lowered or "%3e" in lowered:
+            self.logger.debug("Skipping URL: %s reason=invalid_format", url)
+            return False
+        if "mailto:" in lowered:
+            self.logger.debug("Skipping URL: %s reason=mailto", url)
+            return False
+
+        parsed = urlparse(url)
+        if f"{parsed.scheme}://{parsed.netloc}" != "https://www.art.co.za":
+            self.logger.debug("Skipping URL: %s reason=outside_domain", url)
+            return False
+        if not any(token in parsed.path.lower() for token in ["/artist", "/artists", "/galleries", "/exhibitions"]):
+            self.logger.debug("Skipping URL: %s reason=outside_scope", url)
+            return False
+        if "@" in f"{parsed.path}{parsed.params}{parsed.query}{parsed.fragment}":
+            self.logger.debug("Skipping URL: %s reason=invalid_at_symbol", url)
+            return False
+        if "http" in parsed.path.lower():
+            self.logger.debug("Skipping URL: %s reason=double_url", url)
+            return False
+        return True
 
     def _extract_listing_card_data(self, response: scrapy.http.Response, card: scrapy.selector.Selector) -> dict:
         title = self._first_non_empty(card.css("h1::text, h2::text, h3::text, a::text").get())
