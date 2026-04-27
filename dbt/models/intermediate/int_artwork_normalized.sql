@@ -18,6 +18,7 @@ select
     a.source_name,
     a.source_domain,
     a.source_url,
+    a.source_record_id,
     a.image_url,
     a.thumbnail_url,
     a.description,
