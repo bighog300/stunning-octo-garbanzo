@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import PurePosixPath
 import re
 from urllib.parse import urlparse
@@ -10,6 +11,13 @@ import scrapy
 
 from artio_crawlers.items import ArtworkItem
 from artio_crawlers.utils.hashing import content_hash
+from scraper.parsers.artcoza import (
+    extract_artist_bio,
+    extract_artist_name,
+    extract_artist_profile_context,
+    extract_artworks,
+    extract_events,
+)
 
 
 class ArtCoZaSpider(scrapy.Spider):
@@ -172,6 +180,7 @@ class ArtCoZaSpider(scrapy.Spider):
         self.images_skipped_per_artist: dict[str, int] = {}
         self.artists_with_bio = 0
         self.artists_without_bio = 0
+        self.scraper_debug = os.getenv("ARTIO_SCRAPER_DEBUG", "0").strip() in {"1", "true", "yes"}
 
     def parse(self, response: scrapy.http.Response):
         artist_links = self._extract_artist_profile_links(response)
@@ -367,20 +376,9 @@ class ArtCoZaSpider(scrapy.Spider):
         return True
 
     def _extract_artist_name(self, response: scrapy.http.Response) -> str | None:
-        selectors = [
-            "h1::text",
-            "h2::text",
-            ".artist-name::text",
-            ".profile h1::text",
-            ".profile h2::text",
-            "title::text",
-        ]
-        for selector in selectors:
-            value = response.css(selector).get()
-            if value and value.strip():
-                cleaned = self._clean_artist_name(value)
-                if self._is_valid_artist_name(cleaned):
-                    return cleaned
+        parsed_name = self._clean_artist_name(extract_artist_name(response.text))
+        if self._is_valid_artist_name(parsed_name):
+            return parsed_name
 
         slug_name = self._artist_name_from_slug(response.url)
         return slug_name if self._is_valid_artist_name(slug_name) else None
@@ -610,83 +608,32 @@ class ArtCoZaSpider(scrapy.Spider):
         artist_name: str | None,
         artist_profile_url: str | None,
     ) -> dict:
-        blocks: list[str] = []
-        section_statement: str | None = None
-        artist_name_tokens = self._normalize_token_text(artist_name)
-
-        def add_candidate_block(text: str | None) -> None:
-            cleaned = self._clean_profile_text(text)
-            if not cleaned:
-                return
-            if self._is_junk_profile_text_block(cleaned):
-                return
-            if self._is_probably_junk_container_text(cleaned):
-                return
-            if artist_name_tokens and artist_name_tokens not in self._normalize_token_text(cleaned):
-                # Keep artist-relevant text even when full name is not present if text looks biography-like.
-                lowered = cleaned.lower()
-                if not any(keyword in lowered for keyword in self.PROFILE_SECTION_KEYWORDS):
-                    if len(cleaned.split()) < 10:
-                        return
-            blocks.append(cleaned)
-
-        for heading in response.xpath("//h1|//h2|//h3|//h4|//strong"):
-            heading_text = self._normalize_whitespace(" ".join(heading.xpath(".//text()").getall()))
-            lowered_heading = heading_text.lower()
-            if not any(keyword in lowered_heading for keyword in self.PROFILE_SECTION_KEYWORDS):
-                continue
-            section_parts: list[str] = []
-            for sibling in heading.xpath("following-sibling::*[position()<=6]"):
-                if sibling.root.tag in {"h1", "h2", "h3", "h4"}:
-                    break
-                sibling_text = self._clean_profile_text(" ".join(sibling.xpath(".//text()").getall()))
-                if sibling_text and not self._is_junk_profile_text_block(sibling_text):
-                    section_parts.append(sibling_text)
-            block_text = self._clean_profile_text("\n\n".join(section_parts))
-            if block_text:
-                add_candidate_block(block_text)
-                if "artist statement" in lowered_heading and not section_statement:
-                    section_statement = block_text
-
-        for container in response.xpath(self._profile_container_xpath()):
-            paragraph_text = " ".join(
-                container.xpath(
-                    ".//*[self::p or self::div or self::section][not(ancestor::nav) and not(ancestor::footer) and not(ancestor::aside)]//text()"
-                ).getall()
-            )
-            add_candidate_block(paragraph_text)
-
-        text_near_heading = response.xpath(
-            "//h1[1]/following-sibling::*[position()<=8][not(self::nav) and not(self::footer) and not(self::aside)]//text()"
-            " | //h1[1]/preceding-sibling::*[position()<=5][not(self::nav) and not(self::footer) and not(self::aside)]//text()"
-        ).getall()
-        add_candidate_block(" ".join(text_near_heading))
-
-        gallery_adjacent_text = response.xpath(
-            "//*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
-            "contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
-            "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
-            "/preceding-sibling::*[self::p or self::div][position()<=4]//text()"
-            " | //*[contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
-            "contains(translate(@id, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'gallery') or "
-            "contains(translate(@class, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'artwork')]"
-            "/following-sibling::*[self::p or self::div][position()<=4]//text()"
-        ).getall()
-        add_candidate_block(" ".join(gallery_adjacent_text))
-
-        if not blocks:
-            fallback_candidates = response.xpath("//main//p//text() | //article//p//text() | //body//p//text()").getall()
-            for value in fallback_candidates:
-                add_candidate_block(value)
-
-        deduped_blocks = list(dict.fromkeys(blocks))
-        artist_bio = "\n\n".join(deduped_blocks) if deduped_blocks else None
-        return {
+        profile_context = extract_artist_profile_context(response.text)
+        artist_bio = extract_artist_bio(response.text) or None
+        artworks_snapshot = extract_artworks(response.text)
+        events_snapshot = extract_events(response.text)
+        context = {
             "artist_profile_url": artist_profile_url,
             "artist_bio": artist_bio,
-            "artist_statement": section_statement,
-            "profile_text_blocks": deduped_blocks,
+            "artist_statement": None,
+            "profile_text_blocks": [artist_bio] if artist_bio else [],
+            "parsed_artworks_snapshot": artworks_snapshot,
+            "parsed_events_snapshot": events_snapshot,
+            "fallback_used": bool(profile_context.get("fallback_used")),
         }
+        if self.scraper_debug:
+            self.logger.info(
+                "ARTIO_SCRAPER_DEBUG profile extraction: url=%s bio_len=%d fallback_used=%s candidate_count=%s events=%d artworks=%d",
+                response.url,
+                len(artist_bio or ""),
+                context["fallback_used"],
+                profile_context.get("candidate_count"),
+                len(events_snapshot),
+                len(artworks_snapshot),
+            )
+            if not artist_bio:
+                self.logger.warning("ARTIO_SCRAPER_DEBUG extraction failure: missing bio for url=%s", response.url)
+        return context
 
     def closed(self, reason: str):
         self.logger.info(
