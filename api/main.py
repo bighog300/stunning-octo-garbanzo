@@ -1,6 +1,7 @@
 import os
 from collections.abc import Sequence
 from contextlib import contextmanager
+from datetime import date, datetime
 from typing import Any
 import logging
 
@@ -76,13 +77,19 @@ def _relation_exists(conn: psycopg.Connection, schema: str, relation: str) -> bo
 
 
 def _serialize_rows(rows: Sequence[Any]) -> list[dict[str, Any]]:
-    serialized: list[dict[str, Any]] = []
-    for row in rows:
-        if isinstance(row, dict):
-            serialized.append(row)
-        else:
-            serialized.append(dict(row))
-    return serialized
+    return [_serialize_row(row) for row in rows]
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def _serialize_row(row: Any) -> dict[str, Any]:
+    if isinstance(row, dict):
+        return {key: _json_safe(value) for key, value in row.items()}
+    return {key: _json_safe(value) for key, value in dict(row).items()}
 
 
 def _select_with_fallback(
@@ -255,7 +262,11 @@ def get_artist_profile(artist_name: str) -> dict[str, Any]:
                         )
                         events = _serialize_rows(cur.fetchall())
 
-        return {"artist": dict(artist), "artworks": artworks, "events": events}
+        return {
+            "artist": _serialize_row(artist),
+            "artworks": artworks,
+            "events": events,
+        }
     except HTTPException:
         raise
     except Exception as exc:
