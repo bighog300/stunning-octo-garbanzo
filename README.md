@@ -51,7 +51,7 @@ docker compose exec dbt dbt run --profiles-dir /opt/artio/dbt
 docker compose exec dbt dbt test --profiles-dir /opt/artio/dbt
 ```
 
-5. `app.artwork_records` is created as a placeholder view during PostgreSQL initialization so Superset/API queries can run immediately (it returns zero rows until dbt finishes).
+5. `app.artwork_records` and `app.artist_profiles` are created as placeholder views during PostgreSQL initialization so Superset/API queries can run immediately (they return zero rows until dbt finishes and views are refreshed).
 
 6. Replace the placeholder with the real app view(s) after dbt:
 
@@ -67,7 +67,7 @@ docker compose exec postgres psql -U postgres -d artio -c "select count(*) from 
 docker compose exec postgres psql -U postgres -d artio -c "select count(*) from app.artwork_records;"
 ```
 
-Airflow DAG `refresh_app_views` runs after `dbt_test` and re-applies `infra/postgres/views/create_app_views.sql`, replacing the placeholder with the full definition backed by analytics models.
+Airflow DAG `refresh_app_views` runs after `dbt_test` and re-applies `infra/postgres/views/create_app_views.sql`, replacing placeholders with full definitions (including `app.artist_profiles`) backed by analytics/app models.
 
 ## Airflow
 

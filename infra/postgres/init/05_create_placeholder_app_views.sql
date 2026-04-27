@@ -69,3 +69,12 @@ SELECT
     NULL::TIMESTAMPTZ AS crawl_timestamp
 WHERE false;
 
+CREATE OR REPLACE VIEW app.artist_profiles AS
+SELECT
+    NULL::TEXT AS artist_name,
+    NULL::TEXT AS source_domain,
+    NULL::TEXT AS profile_url,
+    NULL::TEXT AS artist_bio,
+    NULL::BIGINT AS artwork_count,
+    NULL::TIMESTAMPTZ AS last_seen
+WHERE false;
