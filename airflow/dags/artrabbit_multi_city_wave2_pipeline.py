@@ -123,14 +123,15 @@ with DAG(
             pool="artrabbit_pool",
             pool_slots=1,
             bash_command=f"""
-            cd /opt/artio/crawlers && scrapy crawl {SPIDER_NAME} \\
+            cd /opt/artio/crawlers
+            scrapy crawl {SPIDER_NAME} \\
               -a crawl_run_id={{{{ ti.xcom_pull(task_ids='create_crawl_run') }}}} \\
               -a city={city_config['city']} \\
               -a country={city_config['country']} \\
+              -a full_crawl=True \\
               -a max_pages={city_config['max_pages']} \\
               -a max_records={city_config['max_records']} \\
-              -a full_crawl={{{{ dag_run.conf.get('full_crawl', false) }}}} \\
-              -a use_sample_data={{{{ dag_run.conf.get('use_sample_data', false) }}}}
+              -a use_sample_data=False
             """,
         )
 
