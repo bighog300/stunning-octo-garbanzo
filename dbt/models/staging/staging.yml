@@ -49,3 +49,13 @@ models:
       - name: source_domain
         tests:
           - not_null
+
+
+  - name: stg_event_artist_candidates
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+      - name: normalized_candidate_artist_name
+        tests:
+          - not_null

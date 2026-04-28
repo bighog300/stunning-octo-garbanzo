@@ -304,3 +304,16 @@ def test_admin_moderation_metrics(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     payload = main.get_admin_moderation_metrics()
     assert payload["events"]["total"] == 10
+
+
+def test_list_admin_events_filter_has_linked_artists(monkeypatch):
+    holder = FakeConn()
+
+    @contextmanager
+    def _conn():
+        yield holder
+
+    monkeypatch.setattr(main, "get_conn", _conn)
+    main.list_admin_events(limit=20, moderation_status="all", has_linked_artists=True)
+    sql_text = "\n".join(query for query, _params in holder.queries)
+    assert "COALESCE(artist_count, 0) > 0" in sql_text

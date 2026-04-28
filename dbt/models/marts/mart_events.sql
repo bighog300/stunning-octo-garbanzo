@@ -15,12 +15,12 @@ select
     e.opening_datetime,
     e.description,
     e.image_url,
-    count(distinct ea.raw_event_artist_id)::integer as artist_count,
+    count(distinct mea.artist_id)::integer as artist_count,
     e.crawl_timestamp,
     e.created_at
 from {{ ref('stg_events') }} e
-left join {{ ref('stg_event_artists') }} ea
-    on ea.event_id = e.raw_event_id
+left join {{ ref('mart_event_artists') }} mea
+    on mea.event_id = e.raw_event_id
 group by
     e.raw_event_id,
     e.source_name,

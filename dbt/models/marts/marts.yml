@@ -44,3 +44,16 @@ models:
       - name: source_domain
         tests:
           - not_null
+
+
+  - name: mart_event_artists
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+      - name: artist_id
+        tests:
+          - not_null
+      - name: match_type
+        tests:
+          - not_null
