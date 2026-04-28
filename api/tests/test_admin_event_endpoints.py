@@ -45,7 +45,11 @@ class FakeCursor:
             ]
             return
 
-        if "FROM app.event_records" in sql and "WHERE event_id = %s::uuid" in sql:
+        if (
+            "FROM app.event_records" in sql
+            and "WHERE event_id = %s::uuid" in sql
+            and "SELECT 1" not in sql
+        ):
             self._row = {
                 "event_id": params[0],
                 "event_title": "Studio Talk",
@@ -71,7 +75,10 @@ class FakeCursor:
             return
 
         if "SELECT 1 FROM app.event_records" in sql:
-            self._row = {"?column?": 1}
+            if params[0] == "missing-event-id":
+                self._row = None
+            else:
+                self._row = {"?column?": 1}
             return
 
         if "FROM app.event_moderation_overrides" in sql:
@@ -155,3 +162,36 @@ def test_patch_admin_event_moderation(monkeypatch):
     )
     assert response["status"] == "updated"
     assert response["event_moderation"]["is_hidden"] is True
+
+
+def test_patch_admin_events_bulk_moderation(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    payload = main.BulkEventModerationPayload(
+        event_ids=[
+            "11111111-1111-1111-1111-111111111111",
+            "22222222-2222-2222-2222-222222222222",
+        ],
+        updates=main.EventModerationPayload(
+            is_hidden=True,
+            is_approved=True,
+            event_type="exhibition",
+        ),
+    )
+    response = main.patch_admin_events_bulk_moderation(payload)
+    assert response["updated"] == 2
+    assert response["failed"] == []
+
+
+def test_patch_admin_events_bulk_moderation_collects_failures(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    payload = main.BulkEventModerationPayload(
+        event_ids=["11111111-1111-1111-1111-111111111111", "missing-event-id"],
+        updates=main.EventModerationPayload(
+            is_hidden=False,
+            is_approved=False,
+            event_type="talk",
+        ),
+    )
+    response = main.patch_admin_events_bulk_moderation(payload)
+    assert response["updated"] == 1
+    assert response["failed"][0]["event_id"] == "missing-event-id"

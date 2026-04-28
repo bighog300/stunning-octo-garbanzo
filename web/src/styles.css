@@ -114,6 +114,16 @@ button { width: fit-content; padding: 8px 12px; }
   margin: 8px 0;
 }
 
+.inline-controls {
+  display: grid;
+  gap: 6px;
+}
+
+.inline-title-edit input {
+  width: 100%;
+  min-width: 180px;
+}
+
 .moderation-warning {
   background: #fff4e5;
   color: #8a4b00;
