@@ -102,45 +102,80 @@ class ArtRabbitEventsSpider(scrapy.Spider):
 
         self._seen_event_urls: set[str] = set()
         self._listing_pages_seen: set[str] = set()
+        self._listing_pages_queued: set[str] = {self._canonical_page_url(url) for url in self.start_urls}
         self._pages_crawled = 0
         self._records_emitted = 0
 
     def parse(self, response: scrapy.http.Response):
         page_url = self._canonical_page_url(response.url)
+        current_page = self._page_number_from_url(response.url)
         if page_url in self._listing_pages_seen:
+            self._log_listing_page_stats(
+                page_number=current_page,
+                new_event_links_count=0,
+                duplicate_event_links_count=0,
+                stopping_reason="listing_page_already_seen",
+            )
             return
 
-        if self._pages_crawled >= self.max_pages and not self.full_crawl:
+        if not self.full_crawl and current_page > self.max_pages:
+            self._log_listing_page_stats(
+                page_number=current_page,
+                new_event_links_count=0,
+                duplicate_event_links_count=0,
+                stopping_reason="page_number_exceeds_max_pages",
+            )
             return
 
         self._listing_pages_seen.add(page_url)
         self._pages_crawled += 1
 
         event_links = self._extract_event_links(response)
-        for url in event_links:
+        new_event_links = [url for url in event_links if url not in self._seen_event_urls]
+        duplicate_event_links_count = len(event_links) - len(new_event_links)
+
+        stopping_reason: str | None = None
+        if not event_links:
+            stopping_reason = "no_event_links_found"
+        elif not new_event_links:
+            stopping_reason = "all_event_links_already_seen"
+
+        for url in new_event_links:
             if self._limit_reached():
                 break
-            if url in self._seen_event_urls:
-                continue
             self._seen_event_urls.add(url)
             yield response.follow(url, callback=self.parse_detail)
 
-        if self._limit_reached():
+        if self._limit_reached() and not stopping_reason:
+            stopping_reason = "max_records_reached"
+
+        self._log_listing_page_stats(
+            page_number=current_page,
+            new_event_links_count=len(new_event_links),
+            duplicate_event_links_count=duplicate_event_links_count,
+            stopping_reason=stopping_reason,
+        )
+
+        if stopping_reason:
             return
 
-        next_link = response.css("a[rel='next']::attr(href), a.next::attr(href)").get()
-        if next_link:
-            yield response.follow(next_link, callback=self.parse)
+        if not self.full_crawl and current_page >= self.max_pages:
+            self._log_listing_page_stats(
+                page_number=current_page,
+                new_event_links_count=len(new_event_links),
+                duplicate_event_links_count=duplicate_event_links_count,
+                stopping_reason="max_pages_reached",
+            )
+            return
 
-        parsed = urlparse(response.url)
-        query = parse_qs(parsed.query)
-        current_page = int((query.get("page") or ["1"])[0])
-        if self.full_crawl or self._pages_crawled < self.max_pages:
-            next_page = current_page + 1
-            query["page"] = [str(next_page)]
-            auto_next = parsed._replace(query=urlencode({k: v[0] for k, v in query.items()})).geturl()
-            if self._canonical_page_url(auto_next) not in self._listing_pages_seen:
-                yield response.follow(auto_next, callback=self.parse)
+        rel_next = response.css("a[rel='next']::attr(href), a.next::attr(href)").get()
+        next_candidates = [rel_next, self._build_auto_next_url(response.url, current_page)]
+        for next_candidate in next_candidates:
+            if not next_candidate:
+                continue
+            normalized_next = self._canonical_page_url(response.urljoin(next_candidate))
+            if self._should_follow_listing_page(normalized_next):
+                yield response.follow(normalized_next, callback=self.parse)
 
     def parse_detail(self, response: scrapy.http.Response):
         if self._limit_reached():
@@ -418,8 +453,47 @@ class ArtRabbitEventsSpider(scrapy.Spider):
         parsed = urlparse(url)
         query = parse_qs(parsed.query)
         page_value = query.get("page", ["1"])[0]
-        normalized_query = urlencode({"page": page_value}) if page_value and page_value != "1" else ""
+        normalized_query = urlencode({"page": page_value}) if page_value else ""
         return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", normalized_query, ""))
+
+    def _page_number_from_url(self, url: str) -> int:
+        query = parse_qs(urlparse(url).query)
+        try:
+            return int((query.get("page") or ["1"])[0])
+        except ValueError:
+            return 1
+
+    def _build_auto_next_url(self, url: str, current_page: int) -> str:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        query["page"] = [str(current_page + 1)]
+        return parsed._replace(query=urlencode({k: v[0] for k, v in query.items()})).geturl()
+
+    def _should_follow_listing_page(self, normalized_url: str) -> bool:
+        if normalized_url in self._listing_pages_seen:
+            return False
+        if normalized_url in self._listing_pages_queued:
+            return False
+        next_page = self._page_number_from_url(normalized_url)
+        if not self.full_crawl and next_page > self.max_pages:
+            return False
+        self._listing_pages_queued.add(normalized_url)
+        return True
+
+    def _log_listing_page_stats(
+        self,
+        page_number: int,
+        new_event_links_count: int,
+        duplicate_event_links_count: int,
+        stopping_reason: str | None,
+    ) -> None:
+        self.logger.info(
+            "listing_page page=%s new_event_links_count=%s duplicate_event_links_count=%s stopping_reason=%s",
+            page_number,
+            new_event_links_count,
+            duplicate_event_links_count,
+            stopping_reason or "continue",
+        )
 
     def _extract_after_label(self, text: str, labels: list[str]) -> str | None:
         for label in labels:
