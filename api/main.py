@@ -7,6 +7,7 @@ import logging
 
 import psycopg
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -74,6 +75,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(psycopg.Error)
+def psycopg_exception_handler(_request, exc: psycopg.Error):
+    is_dev = os.getenv("ARTIO_ENV", "development").lower() in {"dev", "development", "local"}
+    detail = str(exc) if is_dev else "Database error"
+    return JSONResponse(status_code=500, content={"detail": detail, "error_type": exc.__class__.__name__})
 
 
 def _db_conn_string() -> str:
@@ -174,6 +182,29 @@ SUSPECT_NAME_PATTERNS = [
     "%about the artist%",
 ]
 
+EVENT_RECORD_REQUIRED_COLUMNS = [
+    "event_id",
+    "event_title",
+    "original_event_title",
+    "canonical_event_title",
+    "event_type",
+    "original_event_type",
+    "canonical_event_type",
+    "source_domain",
+    "source_url",
+    "start_date",
+    "end_date",
+    "venue_name",
+    "linked_artists",
+    "is_hidden",
+    "is_approved",
+    "moderation_reason",
+    "moderator_notes",
+    "updated_at",
+    "raw_payload",
+    "crawl_timestamp",
+]
+
 
 def _queue_reason_sql(queue_name: str) -> str:
     mapping = {
@@ -193,6 +224,111 @@ def _queue_reason_sql(queue_name: str) -> str:
 
 def _safe_limit(limit: int) -> int:
     return max(1, min(limit, 500))
+
+
+def validate_event_records_contract(conn: psycopg.Connection) -> list[str]:
+    actual = _relation_columns(conn, "app", "event_records")
+    return [column for column in EVENT_RECORD_REQUIRED_COLUMNS if column not in actual]
+
+
+def _normalize_space(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _normalize_event_title(title: str | None) -> tuple[str | None, str | None]:
+    if not title:
+        return None, None
+    normalized = _normalize_space(title.strip())
+    reason_parts: list[str] = []
+    if normalized != title:
+        reason_parts.append("trimmed whitespace")
+
+    deduped = normalized
+    while "!!" in deduped or "??" in deduped or ".." in deduped:
+        deduped = deduped.replace("!!", "!").replace("??", "?").replace("..", ".")
+    if deduped != normalized:
+        reason_parts.append("removed repeated punctuation")
+    normalized = deduped
+
+    letter_chars = [char for char in normalized if char.isalpha()]
+    if letter_chars and all(char.isupper() for char in letter_chars):
+        normalized = normalized.title()
+        reason_parts.append("converted all-caps title to title case")
+
+    reason = ", ".join(reason_parts) if reason_parts else None
+    if normalized == title:
+        return None, reason
+    return normalized, reason
+
+
+def _suggest_event_type(event: dict[str, Any]) -> tuple[str | None, str | None]:
+    event_type = (event.get("event_type") or "").strip().lower()
+    if event_type:
+        return None, None
+    haystack = f"{event.get('event_title') or ''} {event.get('description') or ''}".lower()
+    keyword_mapping = [
+        ("workshop", ["workshop", "masterclass", "hands-on"]),
+        ("exhibition", ["exhibition", "retrospective", "showcase"]),
+        ("talk", ["talk", "lecture", "panel", "discussion"]),
+        ("fair", ["fair", "expo"]),
+        ("opening", ["opening", "vernissage", "opening night"]),
+    ]
+    for suggestion, keywords in keyword_mapping:
+        if any(keyword in haystack for keyword in keywords):
+            return suggestion, f"keyword match for {suggestion}"
+    if haystack.strip():
+        return "other", "fallback suggestion from non-empty title/description"
+    return None, None
+
+
+def _enrich_event_record(event: dict[str, Any]) -> dict[str, Any]:
+    linked_artists = event.get("linked_artists") or []
+    has_title = bool((event.get("event_title") or "").strip())
+    has_start_date = bool(event.get("start_date"))
+    has_venue = bool((event.get("venue_name") or "").strip())
+    has_artists = isinstance(linked_artists, list) and len(linked_artists) > 0
+    has_description = bool((event.get("description") or "").strip())
+    has_source_url = bool((event.get("source_url") or "").strip())
+    end_before_start = bool(
+        event.get("start_date")
+        and event.get("end_date")
+        and event["end_date"] < event["start_date"]
+    )
+    quality_flags = []
+    if not has_start_date:
+        quality_flags.append("missing_date")
+    if not has_venue:
+        quality_flags.append("missing_venue")
+    if not has_artists:
+        quality_flags.append("missing_artists")
+    if not has_description:
+        quality_flags.append("missing_description")
+    if not has_source_url:
+        quality_flags.append("missing_source_url")
+    if end_before_start:
+        quality_flags.append("end_before_start")
+    quality_score = int(has_title) + int(has_start_date) + int(has_venue) + int(has_artists) + int(has_description)
+
+    suggested_title, title_reason = _normalize_event_title(
+        event.get("canonical_event_title") or event.get("event_title")
+    )
+    suggested_type, type_reason = _suggest_event_type(event)
+    suggestion_reason = "; ".join(part for part in [type_reason, title_reason] if part) or None
+
+    return {
+        **event,
+        "quality_score": quality_score,
+        "quality_flags": quality_flags,
+        "missing_date": not has_start_date,
+        "missing_venue": not has_venue,
+        "missing_artists": not has_artists,
+        "missing_description": not has_description,
+        "missing_source_url": not has_source_url,
+        "end_before_start": end_before_start,
+        "suggested_event_type": suggested_type,
+        "suggested_event_title": suggested_title,
+        "suggestion_reason": suggestion_reason,
+    }
 
 
 def _merged_event_moderation_values(
@@ -779,7 +915,8 @@ def list_artists(
 def list_admin_events(
     limit: int = Query(default=100, ge=1),
     offset: int = Query(default=0, ge=0),
-    moderation_status: str = Query(default="all"),
+    moderation_status: str | None = Query(default=None),
+    queue: str = Query(default="needs_review"),
     event_type: str | None = None,
     source_domain: str | None = None,
     missing_date: bool = False,
@@ -787,20 +924,54 @@ def list_admin_events(
     search: str | None = None,
     include_hidden: bool = True,
 ) -> list[dict[str, Any]]:
+    if not isinstance(offset, int):
+        offset = 0
+    if not isinstance(moderation_status, str):
+        moderation_status = None
+    if not isinstance(queue, str):
+        queue = "needs_review"
     safe_limit = max(1, min(limit, 500))
     where_clauses: list[str] = []
     params: list[Any] = []
 
-    allowed_statuses = {"all", "unmoderated", "approved", "hidden"}
-    if moderation_status not in allowed_statuses:
-        raise HTTPException(status_code=400, detail="Invalid moderation_status")
+    status_to_queue = {
+        "all": "all",
+        "unmoderated": "needs_review",
+        "approved": "approved",
+        "hidden": "hidden",
+    }
+    if moderation_status:
+        if moderation_status not in status_to_queue:
+            raise HTTPException(status_code=400, detail="Invalid moderation_status")
+        queue = status_to_queue[moderation_status]
 
-    if moderation_status == "unmoderated":
-        where_clauses.append("moderation_override_exists = false")
-    elif moderation_status == "approved":
-        where_clauses.append("is_approved = true")
-    elif moderation_status == "hidden":
-        where_clauses.append("is_hidden = true")
+    allowed_queues = {"needs_review", "low_quality", "recent", "approved", "hidden", "edited", "all"}
+    if queue not in allowed_queues:
+        raise HTTPException(status_code=400, detail="Invalid queue")
+
+    if queue == "needs_review":
+        where_clauses.append("COALESCE(is_hidden, false) = false")
+        where_clauses.append("COALESCE(is_approved, false) = false")
+    elif queue == "approved":
+        where_clauses.append("COALESCE(is_approved, false) = true")
+    elif queue == "hidden":
+        where_clauses.append("COALESCE(is_hidden, false) = true")
+    elif queue == "edited":
+        where_clauses.append("COALESCE(moderation_override_exists, false) = true")
+    elif queue == "recent":
+        where_clauses.append("crawl_timestamp >= NOW() - INTERVAL '7 days'")
+    elif queue == "low_quality":
+        where_clauses.append(
+            """
+            (
+                (CASE WHEN COALESCE(NULLIF(btrim(event_title), ''), NULLIF(btrim(original_event_title), '')) IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN start_date IS NULL THEN 0 ELSE 1 END)
+              + (CASE WHEN COALESCE(NULLIF(btrim(venue_name), ''), '') = '' THEN 0 ELSE 1 END)
+              + (CASE WHEN linked_artists IS NULL OR cardinality(linked_artists) = 0 THEN 0 ELSE 1 END)
+              + (CASE WHEN COALESCE(NULLIF(btrim(description), ''), '') = '' THEN 0 ELSE 1 END)
+            ) <= 2
+            """
+        )
 
     if not include_hidden:
         where_clauses.append("is_hidden = false")
@@ -823,24 +994,30 @@ def list_admin_events(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
     params.extend([safe_limit, offset])
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT event_id, event_title, original_event_title, canonical_event_title,
-                       event_type, original_event_type, canonical_event_type,
-                       linked_artists, venue_name, city, country,
-                       start_date, end_date, source_name, source_domain, source_url, crawl_timestamp,
-                       is_hidden, is_approved, moderation_override_exists, moderation_reason, updated_at
-                FROM app.event_records
-                {where_sql}
-                ORDER BY crawl_timestamp DESC NULLS LAST, created_at DESC NULLS LAST
-                LIMIT %s OFFSET %s
-                """,
-                tuple(params),
-            )
-            rows = cur.fetchall()
-    return _serialize_rows(rows)
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"""
+                    SELECT event_id, event_title, original_event_title, canonical_event_title,
+                           event_type, original_event_type, canonical_event_type,
+                           linked_artists, venue_name, city, country,
+                           start_date, end_date, description, source_name, source_domain, source_url, crawl_timestamp,
+                           is_hidden, is_approved, moderation_override_exists, moderation_reason, updated_at
+                    FROM app.event_records
+                    {where_sql}
+                    ORDER BY crawl_timestamp DESC NULLS LAST, created_at DESC NULLS LAST
+                    LIMIT %s OFFSET %s
+                    """,
+                    tuple(params),
+                )
+                rows = cur.fetchall()
+        return [_enrich_event_record(row) for row in _serialize_rows(rows)]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to list admin events")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/api/admin/events/{event_id}")
@@ -879,7 +1056,7 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
                 (event_id,),
             )
             linked_artists = cur.fetchall()
-    return {"event": _serialize_row(event_row), "linked_artists": _serialize_rows(linked_artists)}
+    return {"event": _enrich_event_record(_serialize_row(event_row)), "linked_artists": _serialize_rows(linked_artists)}
 
 
 @app.patch("/api/admin/events/{event_id}/moderation")
@@ -895,6 +1072,8 @@ def patch_admin_event_moderation(event_id: str, payload: EventModerationPayload)
 def patch_admin_events_bulk_moderation(payload: BulkEventModerationPayload) -> dict[str, Any]:
     if not payload.event_ids:
         raise HTTPException(status_code=400, detail="event_ids must be non-empty")
+    if len(payload.event_ids) > 500:
+        raise HTTPException(status_code=400, detail="event_ids exceeds max size of 500")
 
     with get_conn() as conn:
         updated = 0
@@ -908,6 +1087,36 @@ def patch_admin_events_bulk_moderation(payload: BulkEventModerationPayload) -> d
                     failed.append({"event_id": event_id, "detail": str(exc.detail)})
         conn.commit()
     return {"updated": updated, "failed": failed}
+
+
+@app.get("/api/admin/moderation/metrics")
+def get_admin_moderation_metrics() -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)::int AS total,
+                    COUNT(*) FILTER (WHERE COALESCE(is_approved, false) = true)::int AS approved,
+                    COUNT(*) FILTER (WHERE COALESCE(is_hidden, false) = true)::int AS hidden,
+                    COUNT(*) FILTER (WHERE COALESCE(is_approved, false) = false AND COALESCE(is_hidden, false) = false)::int AS unmoderated,
+                    COUNT(*) FILTER (WHERE start_date IS NULL)::int AS missing_date,
+                    COUNT(*) FILTER (WHERE COALESCE(NULLIF(btrim(venue_name), ''), '') = '')::int AS missing_venue,
+                    COUNT(*) FILTER (
+                        WHERE (
+                            (CASE WHEN COALESCE(NULLIF(btrim(event_title), ''), NULLIF(btrim(original_event_title), '')) IS NULL THEN 0 ELSE 1 END)
+                          + (CASE WHEN start_date IS NULL THEN 0 ELSE 1 END)
+                          + (CASE WHEN COALESCE(NULLIF(btrim(venue_name), ''), '') = '' THEN 0 ELSE 1 END)
+                          + (CASE WHEN linked_artists IS NULL OR cardinality(linked_artists) = 0 THEN 0 ELSE 1 END)
+                          + (CASE WHEN COALESCE(NULLIF(btrim(description), ''), '') = '' THEN 0 ELSE 1 END)
+                        ) <= 2
+                    )::int AS low_quality,
+                    COUNT(*) FILTER (WHERE crawl_timestamp >= NOW() - INTERVAL '7 days')::int AS recently_crawled
+                FROM app.event_records
+                """
+            )
+            event_metrics = _serialize_row(cur.fetchone())
+    return {"events": event_metrics}
 
 
 @app.get("/api/review-queue")

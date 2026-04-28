@@ -123,6 +123,10 @@ function patchBulkEventModeration(payload) {
   })
 }
 
+function getAdminModerationMetrics() {
+  return api('/api/admin/moderation/metrics')
+}
+
 function eventModerationStatusLabel(event) {
   return event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'
 }
@@ -155,6 +159,7 @@ function Nav() {
       <Link to="/artists">Artists</Link>
       <Link to="/moderation">Moderation</Link>
       <Link to="/admin/events">Events</Link>
+      <Link to="/admin/moderation-dashboard">Dashboard</Link>
     </nav>
   )
 }
@@ -401,6 +406,7 @@ function ArtistProfilePage() {
           {events.map((event, idx) => (
             <article className="event-card" key={`${event.event_id || event.title || event.event_title}-${idx}`}>
               <h4>{event.event_title || event.title || 'Untitled event'}</h4>
+              {event.event_id && <p><Link to={`/admin/events/${event.event_id}`}>Open admin event</Link></p>}
               {(event.start_date || event.end_date) && (
                 <p>
                   {event.start_date || 'Unknown start'}
@@ -759,9 +765,14 @@ function AdminEventsPage() {
   const [saveError, setSaveError] = React.useState('')
   const [selectedEventIds, setSelectedEventIds] = React.useState(new Set())
   const [bulkEventType, setBulkEventType] = React.useState('')
+  const [activeIndex, setActiveIndex] = React.useState(0)
+  const [showShortcutHelp, setShowShortcutHelp] = React.useState(false)
+  const searchInputRef = React.useRef(null)
+  const typeSelectRefs = React.useRef({})
+  const titleInputRefs = React.useRef({})
 
   const filters = React.useMemo(() => ({
-    moderation_status: searchParams.get('moderation_status') || 'all',
+    queue: searchParams.get('queue') || 'needs_review',
     event_type: searchParams.get('event_type') || '',
     source_domain: searchParams.get('source_domain') || '',
     missing_date: searchParams.get('missing_date') === 'true',
@@ -781,6 +792,7 @@ function AdminEventsPage() {
         if (!mounted) return
         setEvents(Array.isArray(json) ? json : [])
         setSelectedEventIds(new Set())
+        setActiveIndex(0)
       })
       .catch((err) => mounted && setError(err.message))
       .finally(() => mounted && setLoading(false))
@@ -796,6 +808,7 @@ function AdminEventsPage() {
 
   const selectedCount = selectedEventIds.size
   const allVisibleSelected = events.length > 0 && events.every((event) => selectedEventIds.has(event.event_id))
+  const activeEvent = events[activeIndex] || null
 
   function updateEventRow(eventId, updates) {
     setEvents((current) => current.map((event) => (event.event_id === eventId ? { ...event, ...updates } : event)))
@@ -864,22 +877,121 @@ function AdminEventsPage() {
     }
   }
 
+  async function applySuggestion(event) {
+    const updates = {}
+    if (event.suggested_event_type) updates.event_type = event.suggested_event_type
+    if (event.suggested_event_title) updates.canonical_event_title = event.suggested_event_title
+    if (Object.keys(updates).length === 0) return
+    await saveSingleEvent(event.event_id, updates)
+  }
+
+  async function applyVisibleSuggestions() {
+    const candidates = events.filter((event) => event.suggested_event_type || event.suggested_event_title)
+    for (const event of candidates) {
+      // eslint-disable-next-line no-await-in-loop
+      await applySuggestion(event)
+    }
+  }
+
+  React.useEffect(() => {
+    function isTypingTarget(target) {
+      if (!target) return false
+      const tag = target.tagName?.toLowerCase()
+      return target.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select'
+    }
+
+    function withSelectedOrActive() {
+      if (selectedEventIds.size > 0) return Array.from(selectedEventIds)
+      return activeEvent?.event_id ? [activeEvent.event_id] : []
+    }
+
+    function onKeydown(event) {
+      if (isTypingTarget(event.target)) return
+      if (event.key === '?') {
+        event.preventDefault()
+        setShowShortcutHelp((current) => !current)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setSelectedEventIds(new Set())
+        setShowShortcutHelp(false)
+        return
+      }
+      if (event.key === '/') {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+        return
+      }
+      if (event.key === 'j') {
+        event.preventDefault()
+        setActiveIndex((current) => Math.min(events.length - 1, current + 1))
+        return
+      }
+      if (event.key === 'k') {
+        event.preventDefault()
+        setActiveIndex((current) => Math.max(0, current - 1))
+        return
+      }
+      if (event.key === ' ') {
+        event.preventDefault()
+        if (!activeEvent) return
+        toggleSelected(activeEvent.event_id, !selectedEventIds.has(activeEvent.event_id))
+        return
+      }
+      if (event.key === 't') {
+        event.preventDefault()
+        if (activeEvent) typeSelectRefs.current[activeEvent.event_id]?.focus()
+        return
+      }
+      if (event.key === 'e') {
+        event.preventDefault()
+        if (activeEvent) titleInputRefs.current[activeEvent.event_id]?.focus()
+        return
+      }
+      if (['a', 'h', 'u', 'r'].includes(event.key)) {
+        event.preventDefault()
+        const targets = withSelectedOrActive()
+        if (targets.length === 0) return
+        const updates = event.key === 'a'
+          ? { is_approved: true, is_hidden: false }
+          : event.key === 'h'
+            ? { is_hidden: true }
+            : event.key === 'u'
+              ? { is_hidden: false }
+              : { is_approved: false }
+        setSelectedEventIds(new Set(targets))
+        runBulkUpdate(updates)
+      }
+    }
+    window.addEventListener('keydown', onKeydown)
+    return () => window.removeEventListener('keydown', onKeydown)
+  }, [events, selectedEventIds, activeEvent])
+
+  const queueTabs = ['needs_review', 'low_quality', 'recent', 'approved', 'hidden', 'edited', 'all']
+
   return (
     <section>
       <h2>Events moderation</h2>
+      <div className="queue-tabs">
+        {queueTabs.map((queue) => (
+          <button
+            key={queue}
+            className={filters.queue === queue ? 'active-tab' : ''}
+            onClick={() => updateFilter('queue', queue)}
+          >
+            {queue.replace('_', ' ')}
+          </button>
+        ))}
+      </div>
       <div className="controls">
         <input
+          ref={searchInputRef}
           type="search"
           placeholder="Search title or source URL"
           value={filters.search}
           onChange={(e) => updateFilter('search', e.target.value)}
         />
-        <select value={filters.moderation_status} onChange={(e) => updateFilter('moderation_status', e.target.value)}>
-          <option value="all">All moderation states</option>
-          <option value="unmoderated">Unmoderated</option>
-          <option value="approved">Approved</option>
-          <option value="hidden">Hidden</option>
-        </select>
         <input
           type="text"
           placeholder="Event type"
@@ -899,6 +1011,7 @@ function AdminEventsPage() {
       {loading && <p>Loading events…</p>}
       {error && <p className="error-text">Failed to load events: {error}</p>}
       {saveError && <p className="error-text">{saveError}</p>}
+      <p className="help-text">Keyboard shortcuts: ? for help.</p>
       {!loading && !error && (
         <table>
           <thead>
@@ -924,6 +1037,7 @@ function AdminEventsPage() {
                     <button disabled={saving} onClick={() => runBulkUpdate({ is_hidden: true })}>Hide selected</button>
                     <button disabled={saving} onClick={() => runBulkUpdate({ is_hidden: false })}>Unhide selected</button>
                     <button disabled={saving} onClick={() => runBulkUpdate({ is_approved: false })}>Mark unapproved</button>
+                    <button disabled={saving} onClick={applyVisibleSuggestions}>Apply visible suggestions</button>
                     <select value={bulkEventType} onChange={(e) => setBulkEventType(e.target.value)} disabled={saving}>
                       <option value="">Set event type…</option>
                       {availableEventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -935,8 +1049,8 @@ function AdminEventsPage() {
                 </td>
               </tr>
             )}
-            {events.map((event) => (
-              <tr key={event.event_id}>
+            {events.map((event, idx) => (
+              <tr key={event.event_id} className={idx === activeIndex ? 'active-row' : ''} onClick={() => setActiveIndex(idx)}>
                 <td>
                   <input
                     type="checkbox"
@@ -953,7 +1067,15 @@ function AdminEventsPage() {
                 <td>{event.start_date || 'Missing'}{event.end_date ? ` → ${event.end_date}` : ''}</td>
                 <td>{event.source_domain || event.source_name}</td>
                 <td>{event.crawl_timestamp || '—'}</td>
-                <td>{eventModerationStatusLabel(event)}</td>
+                <td>
+                  {eventModerationStatusLabel(event)}
+                  <div className="quality-meta">
+                    <span className="quality-badge">{event.quality_score}/5</span>
+                    {Array.isArray(event.quality_flags) && event.quality_flags.length > 0 && (
+                      <small>{event.quality_flags.join(', ')}</small>
+                    )}
+                  </div>
+                </td>
                 <td>
                   <div className="inline-controls">
                     <label>
@@ -975,6 +1097,7 @@ function AdminEventsPage() {
                       Hide
                     </label>
                     <select
+                      ref={(el) => { typeSelectRefs.current[event.event_id] = el }}
                       value={event.event_type || ''}
                       disabled={saving}
                       onChange={(e) => saveSingleEvent(event.event_id, { event_type: e.target.value })}
@@ -984,6 +1107,7 @@ function AdminEventsPage() {
                     </select>
                     <div className="inline-title-edit">
                       <input
+                        ref={(el) => { titleInputRefs.current[event.event_id] = el }}
                         type="text"
                         defaultValue={event.canonical_event_title || event.event_title || ''}
                         disabled={saving}
@@ -995,12 +1119,28 @@ function AdminEventsPage() {
                         }}
                       />
                     </div>
+                    {(event.suggested_event_type || event.suggested_event_title) && (
+                      <button disabled={saving} onClick={() => applySuggestion(event)}>
+                        Apply suggestion
+                      </button>
+                    )}
                   </div>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+      {showShortcutHelp && (
+        <div className="shortcut-modal">
+          <h3>Keyboard shortcuts</h3>
+          <ul>
+            <li>j / k: move active row</li><li>space: select active row</li><li>a: approve selected or active</li>
+            <li>h: hide selected or active</li><li>u: unhide selected or active</li><li>r: reset approval</li>
+            <li>t: focus type</li><li>e: focus canonical title</li><li>/: focus search</li>
+            <li>esc: clear selection</li><li>?: toggle this help</li>
+          </ul>
+        </div>
       )}
     </section>
   )
@@ -1057,7 +1197,7 @@ function AdminEventDetailPage() {
         <ul>
           {linkedArtists.map((artist) => (
             <li key={artist.artist_activity_id || `${artist.artist_name}-${artist.source_url}`}>
-              {artist.artist_name || 'Unknown artist'}
+              {artist.artist_name ? <Link to={`/artists/${encodeURIComponent(artist.artist_name)}`}>{artist.artist_name}</Link> : 'Unknown artist'}
               {artist.artist_profile_url ? <> — <a href={artist.artist_profile_url} target="_blank" rel="noreferrer">Profile</a></> : null}
             </li>
           ))}
@@ -1099,6 +1239,32 @@ function AdminEventDetailPage() {
   )
 }
 
+function ModerationDashboardPage() {
+  const [metrics, setMetrics] = React.useState(null)
+  const [error, setError] = React.useState('')
+
+  React.useEffect(() => {
+    getAdminModerationMetrics().then(setMetrics).catch((err) => setError(err.message))
+  }, [])
+
+  if (error) return <section><h2>Moderation dashboard</h2><p className="error-text">{error}</p></section>
+  if (!metrics?.events) return <section><h2>Moderation dashboard</h2><p>Loading…</p></section>
+
+  return (
+    <section>
+      <h2>Moderation dashboard</h2>
+      <div className="moderation-grid">
+        {Object.entries(metrics.events).map(([key, value]) => (
+          <article key={key} className="moderation-card">
+            <h3>{key.replaceAll('_', ' ')}</h3>
+            <p><strong>{value}</strong></p>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
 function App() {
   return (
     <div className="app">
@@ -1111,6 +1277,7 @@ function App() {
         <Route path="/moderation" element={<ModerationPage />} />
         <Route path="/admin/events" element={<AdminEventsPage />} />
         <Route path="/admin/events/:eventId" element={<AdminEventDetailPage />} />
+        <Route path="/admin/moderation-dashboard" element={<ModerationDashboardPage />} />
         <Route path="/artworks/:artworkId" element={<ArtworkDetailPage />} />
       </Routes>
     </div>
