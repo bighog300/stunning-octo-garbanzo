@@ -29,6 +29,25 @@ class ArtworkItem(scrapy.Item):
     crawl_run_id = scrapy.Field()
 
 
+class ArtistItem(scrapy.Item):
+    crawl_run_id = scrapy.Field()
+    source_name = scrapy.Field()
+    source_domain = scrapy.Field()
+    source_url = scrapy.Field()
+    source_record_id = scrapy.Field()
+
+    artist_name = scrapy.Field()
+    birth_year_text = scrapy.Field()
+    death_year_text = scrapy.Field()
+    nationality_text = scrapy.Field()
+    biography = scrapy.Field()
+    image_url = scrapy.Field()
+
+    raw_payload = scrapy.Field()
+    content_hash = scrapy.Field()
+    crawl_timestamp = scrapy.Field()
+
+
 class EventItem(scrapy.Item):
     crawl_run_id = scrapy.Field()
     source_name = scrapy.Field()
