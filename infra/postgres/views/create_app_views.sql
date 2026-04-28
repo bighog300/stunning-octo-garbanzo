@@ -144,6 +144,144 @@ LEFT JOIN linked_artists la
 LEFT JOIN app.event_moderation_overrides emo
     ON emo.event_id = me.event_id;
 
+CREATE OR REPLACE VIEW app.gallery_records AS
+WITH base_events AS (
+    SELECT
+        me.event_id,
+        me.event_title,
+        me.event_type,
+        me.venue_name,
+        me.venue_address,
+        me.city,
+        me.country,
+        me.source_domain,
+        me.source_url,
+        me.crawl_timestamp,
+        re.raw_payload
+    FROM analytics.mart_events me
+    LEFT JOIN raw.events re
+        ON re.id = me.event_id
+    WHERE COALESCE(NULLIF(btrim(me.venue_name), ''), '') <> ''
+),
+normalized AS (
+    SELECT
+        be.*,
+        lower(regexp_replace(btrim(be.venue_name), '\s+', ' ', 'g')) AS normalized_gallery_name,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(be.city), ''), 'unknown-city'), '\s+', ' ', 'g')) AS normalized_city,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(be.country), ''), 'unknown-country'), '\s+', ' ', 'g')) AS normalized_country
+    FROM base_events be
+),
+event_artists AS (
+    SELECT
+        maa.event_id,
+        jsonb_agg(
+            DISTINCT jsonb_build_object(
+                'artist_name', maa.artist_name,
+                'artist_profile_url', maa.artist_profile_url
+            )
+        ) FILTER (WHERE maa.artist_name IS NOT NULL) AS linked_artists
+    FROM analytics.mart_artist_activity maa
+    GROUP BY maa.event_id
+),
+rolled AS (
+    SELECT
+        (
+            substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 1, 8)
+            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 9, 4)
+            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 13, 4)
+            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 17, 4)
+            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 21, 12)
+        )::uuid AS gallery_id,
+        n.normalized_gallery_name,
+        n.normalized_city,
+        n.normalized_country,
+        MIN(n.venue_name) AS gallery_name,
+        MIN(NULLIF(btrim(n.venue_address), '')) AS gallery_address,
+        MIN(NULLIF(btrim(n.city), '')) AS city,
+        MIN(NULLIF(btrim(n.country), '')) AS country,
+        MIN(NULLIF(btrim(n.source_domain), '')) AS source_domain,
+        MIN(NULLIF(btrim(n.source_url), '')) AS source_url,
+        MAX(n.crawl_timestamp) AS crawl_timestamp,
+        jsonb_agg(
+            DISTINCT jsonb_build_object(
+                'event_id', n.event_id,
+                'event_title', n.event_title,
+                'event_type', n.event_type,
+                'source_domain', n.source_domain,
+                'source_url', n.source_url,
+                'crawl_timestamp', n.crawl_timestamp
+            )
+        ) AS linked_events,
+        COALESCE(
+            jsonb_agg(DISTINCT ea.linked_artists) FILTER (WHERE ea.linked_artists IS NOT NULL),
+            '[]'::jsonb
+        ) AS linked_artists_nested,
+        jsonb_agg(n.raw_payload) FILTER (WHERE n.raw_payload IS NOT NULL) AS raw_payload
+    FROM normalized n
+    LEFT JOIN event_artists ea
+        ON ea.event_id = n.event_id
+    GROUP BY n.normalized_gallery_name, n.normalized_city, n.normalized_country
+),
+flattened AS (
+    SELECT
+        r.*,
+        COALESCE(
+            (
+                SELECT jsonb_agg(DISTINCT artist_item)
+                FROM jsonb_array_elements(r.linked_artists_nested) nested,
+                     jsonb_array_elements(nested) artist_item
+            ),
+            '[]'::jsonb
+        ) AS linked_artists
+    FROM rolled r
+)
+SELECT
+    f.gallery_id,
+    f.gallery_name,
+    f.normalized_gallery_name,
+    f.gallery_address,
+    f.city,
+    f.country,
+    f.source_domain,
+    f.source_url,
+    f.linked_events,
+    f.linked_artists,
+    COALESCE(gmo.is_hidden, false) AS is_hidden,
+    COALESCE(gmo.is_approved, false) AS is_approved,
+    gmo.canonical_gallery_name,
+    gmo.canonical_gallery_type,
+    gmo.canonical_address,
+    gmo.canonical_city,
+    gmo.canonical_country,
+    gmo.moderation_reason,
+    gmo.moderator_notes,
+    gmo.updated_at,
+    (
+        (CASE WHEN COALESCE(NULLIF(btrim(f.gallery_name), ''), '') <> '' THEN 1 ELSE 0 END)
+      + (CASE WHEN COALESCE(NULLIF(btrim(f.gallery_address), ''), '') <> '' THEN 1 ELSE 0 END)
+      + (CASE WHEN COALESCE(NULLIF(btrim(f.city), ''), '') <> '' THEN 1 ELSE 0 END)
+      + (CASE WHEN COALESCE(NULLIF(btrim(f.country), ''), '') <> '' THEN 1 ELSE 0 END)
+      + (CASE WHEN COALESCE(NULLIF(btrim(f.source_domain), ''), '') <> '' OR COALESCE(NULLIF(btrim(f.source_url), ''), '') <> '' THEN 1 ELSE 0 END)
+      + (CASE WHEN jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) > 0 THEN 1 ELSE 0 END)
+    )::integer AS quality_score,
+    ARRAY_REMOVE(ARRAY[
+        CASE WHEN COALESCE(NULLIF(btrim(f.gallery_address), ''), '') = '' THEN 'missing_address' END,
+        CASE WHEN COALESCE(NULLIF(btrim(f.city), ''), '') = '' THEN 'missing_city' END,
+        CASE WHEN COALESCE(NULLIF(btrim(f.country), ''), '') = '' THEN 'missing_country' END,
+        CASE WHEN COALESCE(NULLIF(btrim(f.source_domain), ''), '') = '' AND COALESCE(NULLIF(btrim(f.source_url), ''), '') = '' THEN 'missing_website' END,
+        CASE WHEN jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) = 0 THEN 'missing_linked_events' END
+    ], NULL)::TEXT[] AS quality_flags,
+    COALESCE(NULLIF(btrim(f.gallery_address), ''), '') = '' AS missing_address,
+    COALESCE(NULLIF(btrim(f.city), ''), '') = '' AS missing_city,
+    COALESCE(NULLIF(btrim(f.country), ''), '') = '' AS missing_country,
+    COALESCE(NULLIF(btrim(f.source_domain), ''), '') = '' AND COALESCE(NULLIF(btrim(f.source_url), ''), '') = '' AS missing_website,
+    jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) = 0 AS missing_linked_events,
+    COALESCE(f.raw_payload, '[]'::jsonb) AS raw_payload,
+    f.crawl_timestamp
+FROM flattened f
+LEFT JOIN app.gallery_moderation_overrides gmo
+    ON gmo.gallery_id = f.gallery_id;
+
 CREATE OR REPLACE VIEW app.artist_event_links AS
 SELECT
     artist_activity_id,

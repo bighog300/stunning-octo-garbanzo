@@ -67,6 +67,23 @@ class BulkEventModerationPayload(BaseModel):
     updates: EventModerationPayload
 
 
+class GalleryModerationPayload(BaseModel):
+    is_hidden: bool | None = None
+    is_approved: bool | None = None
+    canonical_gallery_name: str | None = None
+    canonical_gallery_type: str | None = None
+    canonical_address: str | None = None
+    canonical_city: str | None = None
+    canonical_country: str | None = None
+    moderation_reason: str | None = None
+    moderator_notes: str | None = None
+
+
+class BulkGalleryModerationPayload(BaseModel):
+    gallery_ids: list[str] = Field(min_length=1)
+    updates: GalleryModerationPayload
+
+
 class AutoApplySuggestionsPayload(BaseModel):
     limit: int = Field(default=500, ge=1, le=500)
     dry_run: bool = True
@@ -517,6 +534,133 @@ def _upsert_event_moderation(
     return _serialize_row(row)
 
 
+def _enrich_gallery_record(gallery: dict[str, Any]) -> dict[str, Any]:
+    linked_events = gallery.get("linked_events") or []
+    if not isinstance(linked_events, list):
+        linked_events = []
+    has_address = bool((gallery.get("gallery_address") or "").strip())
+    has_city = bool((gallery.get("city") or "").strip())
+    has_country = bool((gallery.get("country") or "").strip())
+    has_website = bool((gallery.get("source_domain") or "").strip() or (gallery.get("source_url") or "").strip())
+    has_linked_events = len(linked_events) > 0
+    quality_flags = []
+    if not has_address:
+        quality_flags.append("missing_address")
+    if not has_city:
+        quality_flags.append("missing_city")
+    if not has_country:
+        quality_flags.append("missing_country")
+    if not has_website:
+        quality_flags.append("missing_website")
+    if not has_linked_events:
+        quality_flags.append("missing_linked_events")
+    quality_score = (
+        int(bool((gallery.get("gallery_name") or "").strip()))
+        + int(has_address)
+        + int(has_city)
+        + int(has_country)
+        + int(has_website)
+        + int(has_linked_events)
+    )
+    return {
+        **gallery,
+        "quality_score": quality_score,
+        "quality_flags": quality_flags,
+        "missing_address": not has_address,
+        "missing_city": not has_city,
+        "missing_country": not has_country,
+        "missing_website": not has_website,
+        "missing_linked_events": not has_linked_events,
+    }
+
+
+def _merged_gallery_moderation_values(
+    current: dict[str, Any], payload: GalleryModerationPayload
+) -> tuple[bool, bool, str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
+    next_hidden = payload.is_hidden if payload.is_hidden is not None else current.get("is_hidden", False)
+    next_approved = payload.is_approved if payload.is_approved is not None else current.get("is_approved", False)
+    next_name = (
+        payload.canonical_gallery_name
+        if payload.canonical_gallery_name is not None
+        else current.get("canonical_gallery_name")
+    )
+    next_type = (
+        payload.canonical_gallery_type
+        if payload.canonical_gallery_type is not None
+        else current.get("canonical_gallery_type")
+    )
+    next_address = (
+        payload.canonical_address if payload.canonical_address is not None else current.get("canonical_address")
+    )
+    next_city = payload.canonical_city if payload.canonical_city is not None else current.get("canonical_city")
+    next_country = (
+        payload.canonical_country if payload.canonical_country is not None else current.get("canonical_country")
+    )
+    next_reason = (
+        payload.moderation_reason
+        if payload.moderation_reason is not None
+        else current.get("moderation_reason")
+    )
+    next_notes = payload.moderator_notes if payload.moderator_notes is not None else current.get("moderator_notes")
+    return (
+        next_hidden,
+        next_approved,
+        next_name,
+        next_type,
+        next_address,
+        next_city,
+        next_country,
+        next_reason,
+        next_notes,
+    )
+
+
+def _upsert_gallery_moderation(cur: psycopg.Cursor, gallery_id: str, payload: GalleryModerationPayload) -> dict[str, Any]:
+    cur.execute("SELECT gallery_id FROM app.gallery_records WHERE gallery_id = %s::uuid LIMIT 1", (gallery_id,))
+    if not cur.fetchone():
+        raise HTTPException(status_code=404, detail=f"Gallery not found: {gallery_id}")
+    cur.execute(
+        """
+        SELECT is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
+               canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes
+        FROM app.gallery_moderation_overrides
+        WHERE gallery_id = %s::uuid
+        LIMIT 1
+        """,
+        (gallery_id,),
+    )
+    current = cur.fetchone() or {}
+    merged = _merged_gallery_moderation_values(current, payload)
+    cur.execute(
+        """
+        INSERT INTO app.gallery_moderation_overrides (
+            gallery_id, is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
+            canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes, updated_at
+        )
+        VALUES (
+            %s::uuid, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''),
+            NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), now()
+        )
+        ON CONFLICT (gallery_id)
+        DO UPDATE SET
+            is_hidden = EXCLUDED.is_hidden,
+            is_approved = EXCLUDED.is_approved,
+            canonical_gallery_name = EXCLUDED.canonical_gallery_name,
+            canonical_gallery_type = EXCLUDED.canonical_gallery_type,
+            canonical_address = EXCLUDED.canonical_address,
+            canonical_city = EXCLUDED.canonical_city,
+            canonical_country = EXCLUDED.canonical_country,
+            moderation_reason = EXCLUDED.moderation_reason,
+            moderator_notes = EXCLUDED.moderator_notes,
+            updated_at = now()
+        RETURNING gallery_id, is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
+                  canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes, updated_at
+        """,
+        (gallery_id, *merged),
+    )
+    return _serialize_row(cur.fetchone())
+
+
 def _determine_correction_action(
     *,
     old_value: str | None,
@@ -942,7 +1086,6 @@ def create_data_quality_flag(payload: DataQualityFlagPayload) -> dict[str, Any]:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                learned_rules = _load_event_learned_rules(cur)
                 cur.execute(
                     """
                     INSERT INTO app.data_quality_flags (
@@ -1112,7 +1255,6 @@ def list_artists(
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
-                learned_rules = _load_event_learned_rules(cur)
                 cur.execute(
                     f"""
                     SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
@@ -1289,9 +1431,25 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
                 (event_id,),
             )
             linked_artists = cur.fetchall()
+            cur.execute(
+                """
+                SELECT gallery_id, COALESCE(canonical_gallery_name, gallery_name) AS gallery_name
+                FROM app.gallery_records gr
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(gr.linked_events, '[]'::jsonb)) AS ev
+                    WHERE ev->>'event_id' = %s
+                )
+                ORDER BY crawl_timestamp DESC NULLS LAST
+                LIMIT 1
+                """,
+                (event_id,),
+            )
+            linked_gallery = cur.fetchone()
     return {
         "event": _enrich_event_record(_serialize_row(event_row), learned_rules=learned_rules),
         "linked_artists": _serialize_rows(linked_artists),
+        "linked_gallery": _serialize_row(linked_gallery) if linked_gallery else None,
     }
 
 
@@ -1432,6 +1590,124 @@ def patch_admin_events_bulk_moderation(payload: BulkEventModerationPayload) -> d
     return {"updated": updated, "failed": failed}
 
 
+@app.get("/api/admin/galleries")
+def list_admin_galleries(
+    limit: int = Query(default=100, ge=1),
+    offset: int = Query(default=0, ge=0),
+    queue: str = Query(default="needs_review"),
+    search: str | None = None,
+    source_domain: str | None = None,
+    missing_address: bool = False,
+    missing_city: bool = False,
+    missing_country: bool = False,
+    include_hidden: bool = True,
+) -> list[dict[str, Any]]:
+    safe_limit = _safe_limit(limit)
+    where_clauses: list[str] = []
+    params: list[Any] = []
+    allowed_queues = {"needs_review", "low_quality", "recent", "approved", "hidden", "edited", "all"}
+    if queue not in allowed_queues:
+        raise HTTPException(status_code=400, detail="Invalid queue")
+    if queue == "needs_review":
+        where_clauses.extend(["COALESCE(is_hidden, false) = false", "COALESCE(is_approved, false) = false"])
+    elif queue == "approved":
+        where_clauses.append("COALESCE(is_approved, false) = true")
+    elif queue == "hidden":
+        where_clauses.append("COALESCE(is_hidden, false) = true")
+    elif queue == "edited":
+        where_clauses.append("updated_at IS NOT NULL")
+    elif queue == "recent":
+        where_clauses.append("crawl_timestamp >= NOW() - INTERVAL '7 days'")
+    elif queue == "low_quality":
+        where_clauses.append("COALESCE(quality_score, 0) <= 3")
+    if not include_hidden:
+        where_clauses.append("COALESCE(is_hidden, false) = false")
+    if source_domain:
+        where_clauses.append("source_domain = %s")
+        params.append(source_domain)
+    if missing_address:
+        where_clauses.append("missing_address = true")
+    if missing_city:
+        where_clauses.append("missing_city = true")
+    if missing_country:
+        where_clauses.append("missing_country = true")
+    if search:
+        where_clauses.append("(gallery_name ILIKE %s OR canonical_gallery_name ILIKE %s OR source_url ILIKE %s)")
+        params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    params.extend([safe_limit, offset])
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""
+                SELECT gallery_id, gallery_name, normalized_gallery_name, gallery_address, city, country,
+                       source_domain, source_url, linked_events, linked_artists, is_hidden, is_approved,
+                       canonical_gallery_name, canonical_gallery_type, canonical_address, canonical_city,
+                       canonical_country, moderation_reason, moderator_notes, updated_at,
+                       quality_score, quality_flags, missing_address, missing_city, missing_country,
+                       missing_website, missing_linked_events, crawl_timestamp
+                FROM app.gallery_records
+                {where_sql}
+                ORDER BY crawl_timestamp DESC NULLS LAST
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            )
+            rows = cur.fetchall()
+    return [_enrich_gallery_record(_serialize_row(row)) for row in rows]
+
+
+@app.get("/api/admin/galleries/{gallery_id}")
+def get_admin_gallery(gallery_id: str) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT gallery_id, gallery_name, normalized_gallery_name, gallery_address, city, country,
+                       source_domain, source_url, linked_events, linked_artists, is_hidden, is_approved,
+                       canonical_gallery_name, canonical_gallery_type, canonical_address, canonical_city,
+                       canonical_country, moderation_reason, moderator_notes, updated_at,
+                       quality_score, quality_flags, missing_address, missing_city, missing_country,
+                       missing_website, missing_linked_events, raw_payload, crawl_timestamp
+                FROM app.gallery_records
+                WHERE gallery_id = %s::uuid
+                LIMIT 1
+                """,
+                (gallery_id,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Gallery not found")
+    return {"gallery": _enrich_gallery_record(_serialize_row(row))}
+
+
+@app.patch("/api/admin/galleries/{gallery_id}/moderation")
+def patch_admin_gallery_moderation(gallery_id: str, payload: GalleryModerationPayload) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            row = _upsert_gallery_moderation(cur, gallery_id, payload)
+        conn.commit()
+    return {"status": "updated", "gallery_moderation": row}
+
+
+@app.patch("/api/admin/galleries/bulk-moderation")
+def patch_admin_galleries_bulk_moderation(payload: BulkGalleryModerationPayload) -> dict[str, Any]:
+    if len(payload.gallery_ids) > 500:
+        raise HTTPException(status_code=400, detail="gallery_ids exceeds max size of 500")
+    with get_conn() as conn:
+        updated = 0
+        failed: list[dict[str, str]] = []
+        with conn.cursor() as cur:
+            for gallery_id in payload.gallery_ids:
+                try:
+                    _upsert_gallery_moderation(cur, gallery_id, payload.updates)
+                    updated += 1
+                except HTTPException as exc:
+                    failed.append({"gallery_id": gallery_id, "detail": str(exc.detail)})
+        conn.commit()
+    return {"updated": updated, "failed": failed}
+
+
 @app.get("/api/admin/moderation/metrics")
 def get_admin_moderation_metrics() -> dict[str, Any]:
     with get_conn() as conn:
@@ -1459,7 +1735,23 @@ def get_admin_moderation_metrics() -> dict[str, Any]:
                 """
             )
             event_metrics = _serialize_row(cur.fetchone())
-    return {"events": event_metrics}
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*)::int AS total,
+                    COUNT(*) FILTER (WHERE COALESCE(is_approved, false) = true)::int AS approved,
+                    COUNT(*) FILTER (WHERE COALESCE(is_hidden, false) = true)::int AS hidden,
+                    COUNT(*) FILTER (WHERE COALESCE(is_approved, false) = false AND COALESCE(is_hidden, false) = false)::int AS unmoderated,
+                    COUNT(*) FILTER (WHERE missing_address = true)::int AS missing_address,
+                    COUNT(*) FILTER (WHERE missing_city = true)::int AS missing_city,
+                    COUNT(*) FILTER (WHERE missing_country = true)::int AS missing_country,
+                    COUNT(*) FILTER (WHERE COALESCE(quality_score, 0) <= 3)::int AS low_quality,
+                    COUNT(*) FILTER (WHERE crawl_timestamp >= NOW() - INTERVAL '7 days')::int AS recently_crawled
+                FROM app.gallery_records
+                """
+            )
+            gallery_metrics = _serialize_row(cur.fetchone())
+    return {"events": event_metrics, "galleries": gallery_metrics}
 
 
 @app.get("/api/review-queue")

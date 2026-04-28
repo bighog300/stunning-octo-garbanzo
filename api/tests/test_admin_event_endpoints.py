@@ -62,6 +62,9 @@ class FakeCursor:
         if "FROM app.artist_event_links" in sql:
             self._rows = [{"artist_activity_id": "aaa", "artist_name": "Alice"}]
             return
+        if "FROM app.gallery_records gr" in sql:
+            self._row = {"gallery_id": "33333333-3333-3333-3333-333333333333", "gallery_name": "Main Hall"}
+            return
 
         if "COUNT(*)::int AS total" in sql and "FROM app.event_records" in sql:
             self._row = {
@@ -73,6 +76,19 @@ class FakeCursor:
                 "missing_venue": 2,
                 "low_quality": 4,
                 "recently_crawled": 5,
+            }
+            return
+        if "COUNT(*)::int AS total" in sql and "FROM app.gallery_records" in sql:
+            self._row = {
+                "total": 7,
+                "approved": 2,
+                "hidden": 1,
+                "unmoderated": 4,
+                "missing_address": 3,
+                "missing_city": 1,
+                "missing_country": 1,
+                "low_quality": 2,
+                "recently_crawled": 4,
             }
             return
 

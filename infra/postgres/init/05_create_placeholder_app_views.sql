@@ -100,6 +100,39 @@ SELECT
     NULL::TIMESTAMPTZ AS crawl_timestamp
 WHERE false;
 
+CREATE OR REPLACE VIEW app.gallery_records AS
+SELECT
+    NULL::UUID AS gallery_id,
+    NULL::TEXT AS gallery_name,
+    NULL::TEXT AS normalized_gallery_name,
+    NULL::TEXT AS gallery_address,
+    NULL::TEXT AS city,
+    NULL::TEXT AS country,
+    NULL::TEXT AS source_domain,
+    NULL::TEXT AS source_url,
+    '[]'::JSONB AS linked_events,
+    '[]'::JSONB AS linked_artists,
+    NULL::BOOLEAN AS is_hidden,
+    NULL::BOOLEAN AS is_approved,
+    NULL::TEXT AS canonical_gallery_name,
+    NULL::TEXT AS canonical_gallery_type,
+    NULL::TEXT AS canonical_address,
+    NULL::TEXT AS canonical_city,
+    NULL::TEXT AS canonical_country,
+    NULL::TEXT AS moderation_reason,
+    NULL::TEXT AS moderator_notes,
+    NULL::TIMESTAMPTZ AS updated_at,
+    NULL::INTEGER AS quality_score,
+    ARRAY[]::TEXT[] AS quality_flags,
+    NULL::BOOLEAN AS missing_address,
+    NULL::BOOLEAN AS missing_city,
+    NULL::BOOLEAN AS missing_country,
+    NULL::BOOLEAN AS missing_website,
+    NULL::BOOLEAN AS missing_linked_events,
+    '[]'::JSONB AS raw_payload,
+    NULL::TIMESTAMPTZ AS crawl_timestamp
+WHERE false;
+
 CREATE OR REPLACE VIEW app.artist_profiles AS
 SELECT
     NULL::TEXT AS artist_name,
