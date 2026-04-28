@@ -20,3 +20,5 @@ def test_artrabbit_dag_uses_registered_spider_name() -> None:
     assert dag_spider_name == spider_name == "art_rabbit_events"
     assert "scrapy crawl {SPIDER_NAME}" in dag_source
     assert "scrapy crawl artrabbit_events" not in dag_source
+    assert "{{{{ dag_run.conf.get" in dag_source
+    assert re.search(r"(?<!\{)\{ dag_run\.conf\.get\([^)]*\) \}(?!\})", dag_source) is None
