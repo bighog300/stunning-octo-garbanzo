@@ -2,6 +2,7 @@ import os
 from collections.abc import Sequence
 from contextlib import contextmanager
 from datetime import date, datetime
+from difflib import SequenceMatcher
 from typing import Any
 import logging
 
@@ -64,6 +65,12 @@ class EventModerationPayload(BaseModel):
 class BulkEventModerationPayload(BaseModel):
     event_ids: list[str] = Field(min_length=1)
     updates: EventModerationPayload
+
+
+class AutoApplySuggestionsPayload(BaseModel):
+    limit: int = Field(default=500, ge=1, le=500)
+    dry_run: bool = True
+    queue: str = "needs_review"
 
 
 app = FastAPI(title="Artio API", version="0.1.0")
@@ -261,27 +268,94 @@ def _normalize_event_title(title: str | None) -> tuple[str | None, str | None]:
     return normalized, reason
 
 
-def _suggest_event_type(event: dict[str, Any]) -> tuple[str | None, str | None]:
+def _load_event_learned_rules(cur: psycopg.Cursor) -> list[dict[str, Any]]:
+    if not _relation_exists(cur.connection, "app", "event_learned_rules"):
+        return []
+    cur.execute(
+        """
+        SELECT field_name, pattern, suggested_value, confidence, support_count,
+               accepted_count, rejected_count, source_domain
+        FROM app.event_learned_rules
+        WHERE is_active = true
+        ORDER BY confidence DESC, support_count DESC, updated_at DESC
+        LIMIT 500
+        """
+    )
+    return cur.fetchall() or []
+
+
+def _suggest_event_type(
+    event: dict[str, Any], learned_rules: list[dict[str, Any]] | None = None
+) -> tuple[str | None, float | None, str | None]:
     event_type = (event.get("event_type") or "").strip().lower()
     if event_type:
-        return None, None
+        return None, None, None
+    if (event.get("canonical_event_type") or "").strip():
+        return None, None, None
     haystack = f"{event.get('event_title') or ''} {event.get('description') or ''}".lower()
+    for rule in learned_rules or []:
+        if rule.get("field_name") != "event_type":
+            continue
+        pattern = (rule.get("pattern") or "").strip().lower()
+        if not pattern:
+            continue
+        if pattern in haystack and (rule.get("source_domain") in (None, "", event.get("source_domain"))):
+            return (
+                rule.get("suggested_value"),
+                float(rule.get("confidence") or 0.5),
+                f"learned rule match: {pattern}",
+            )
+
     keyword_mapping = [
-        ("workshop", ["workshop", "masterclass", "hands-on"]),
-        ("exhibition", ["exhibition", "retrospective", "showcase"]),
-        ("talk", ["talk", "lecture", "panel", "discussion"]),
-        ("fair", ["fair", "expo"]),
-        ("opening", ["opening", "vernissage", "opening night"]),
+        ("workshop", ["workshop", "masterclass", "class", "course"], 0.95),
+        ("exhibition", ["exhibition", "solo show", "group show", "retrospective"], 0.93),
+        ("talk", ["artist talk", "lecture", "conversation", "panel"], 0.92),
+        ("fair", ["art fair", "expo", "biennale"], 0.90),
+        ("opening", ["opening", "vernissage", "launch"], 0.85),
     ]
-    for suggestion, keywords in keyword_mapping:
+    for suggestion, keywords, confidence in keyword_mapping:
         if any(keyword in haystack for keyword in keywords):
-            return suggestion, f"keyword match for {suggestion}"
-    if haystack.strip():
-        return "other", "fallback suggestion from non-empty title/description"
-    return None, None
+            return suggestion, confidence, f"keyword match for {suggestion}"
+    return None, None, None
 
 
-def _enrich_event_record(event: dict[str, Any]) -> dict[str, Any]:
+def _normalize_event_title_with_confidence(title: str | None) -> tuple[str | None, float | None, str | None]:
+    if not title:
+        return None, None, None
+    original = title
+    normalized = title.strip()
+    if normalized != original:
+        return normalized, 0.99, "trimmed whitespace"
+
+    collapsed = _normalize_space(normalized)
+    if collapsed != normalized:
+        return collapsed, 0.99, "collapsed repeated spaces"
+
+    deduped = collapsed
+    while "!!" in deduped or "??" in deduped or ".." in deduped:
+        deduped = deduped.replace("!!", "!").replace("??", "?").replace("..", ".")
+    if deduped != collapsed:
+        return deduped, 0.95, "removed repeated punctuation"
+
+    letter_chars = [char for char in deduped if char.isalpha()]
+    if letter_chars and all(char.isupper() for char in letter_chars):
+        return deduped.title(), 0.90, "converted all-caps title to title case"
+
+    return None, None, None
+
+
+def _is_safe_title_change(current_title: str | None, suggested_title: str | None) -> bool:
+    if not suggested_title:
+        return False
+    if not current_title:
+        return True
+    ratio = SequenceMatcher(None, current_title.strip().lower(), suggested_title.strip().lower()).ratio()
+    return ratio >= 0.88
+
+
+def _enrich_event_record(
+    event: dict[str, Any], learned_rules: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
     linked_artists = event.get("linked_artists") or []
     has_title = bool((event.get("event_title") or "").strip())
     has_start_date = bool(event.get("start_date"))
@@ -309,10 +383,10 @@ def _enrich_event_record(event: dict[str, Any]) -> dict[str, Any]:
         quality_flags.append("end_before_start")
     quality_score = int(has_title) + int(has_start_date) + int(has_venue) + int(has_artists) + int(has_description)
 
-    suggested_title, title_reason = _normalize_event_title(
+    suggested_title, title_confidence, title_reason = _normalize_event_title_with_confidence(
         event.get("canonical_event_title") or event.get("event_title")
     )
-    suggested_type, type_reason = _suggest_event_type(event)
+    suggested_type, type_confidence, type_reason = _suggest_event_type(event, learned_rules=learned_rules)
     suggestion_reason = "; ".join(part for part in [type_reason, title_reason] if part) or None
 
     return {
@@ -326,7 +400,11 @@ def _enrich_event_record(event: dict[str, Any]) -> dict[str, Any]:
         "missing_source_url": not has_source_url,
         "end_before_start": end_before_start,
         "suggested_event_type": suggested_type,
+        "event_type_confidence": type_confidence,
+        "event_type_suggestion_reason": type_reason,
         "suggested_event_title": suggested_title,
+        "event_title_confidence": title_confidence,
+        "event_title_suggestion_reason": title_reason,
         "suggestion_reason": suggestion_reason,
     }
 
@@ -356,15 +434,27 @@ def _merged_event_moderation_values(
 
 
 def _upsert_event_moderation(
-    cur: psycopg.Cursor, event_id: str, payload: EventModerationPayload
+    cur: psycopg.Cursor,
+    event_id: str,
+    payload: EventModerationPayload,
+    *,
+    actor: str = "admin_ui",
+    action_override: str | None = None,
 ) -> dict[str, Any]:
+    learned_rules = _load_event_learned_rules(cur)
     cur.execute(
-        "SELECT 1 FROM app.event_records WHERE event_id = %s::uuid LIMIT 1",
+        """
+        SELECT event_id, event_title, description, source_domain, canonical_event_title, canonical_event_type, event_type
+        FROM app.event_records
+        WHERE event_id = %s::uuid
+        LIMIT 1
+        """,
         (event_id,),
     )
-    exists = cur.fetchone()
-    if not exists:
+    event_record = cur.fetchone()
+    if not event_record:
         raise HTTPException(status_code=404, detail=f"Event not found: {event_id}")
+    enriched = _enrich_event_record(_serialize_row(event_record), learned_rules=learned_rules)
 
     cur.execute(
         """
@@ -414,7 +504,146 @@ def _upsert_event_moderation(
         ),
     )
     row = cur.fetchone()
+    _log_corrections_for_moderation(
+        cur,
+        event_id=event_id,
+        previous=current,
+        updated=row,
+        enriched=enriched,
+        actor=actor,
+        action_override=action_override,
+    )
+    _update_learned_rules_from_moderation(cur, enriched=enriched, previous=current, updated=row)
     return _serialize_row(row)
+
+
+def _determine_correction_action(
+    *,
+    old_value: str | None,
+    new_value: str | None,
+    suggested_value: str | None,
+    previous_moderation_reason: str | None = None,
+    action_override: str | None = None,
+) -> str:
+    if action_override:
+        return action_override
+    old_clean = (old_value or "").strip() or None
+    new_clean = (new_value or "").strip() or None
+    suggested_clean = (suggested_value or "").strip() or None
+    if (previous_moderation_reason or "").startswith("auto_applied"):
+        return "reverted" if new_clean is None else "rejected"
+    if new_clean is None and old_clean:
+        return "reverted"
+    if suggested_clean and new_clean == suggested_clean:
+        return "accepted"
+    if suggested_clean and new_clean is None:
+        return "rejected"
+    if suggested_clean and new_clean != suggested_clean:
+        return "manually_edited"
+    return "manually_edited"
+
+
+def _log_corrections_for_moderation(
+    cur: psycopg.Cursor,
+    *,
+    event_id: str,
+    previous: dict[str, Any],
+    updated: dict[str, Any],
+    enriched: dict[str, Any],
+    actor: str,
+    action_override: str | None = None,
+) -> None:
+    if not _relation_exists(cur.connection, "app", "event_moderation_corrections"):
+        return
+    field_specs = [
+        ("canonical_event_type", "event_type", "suggested_event_type", "event_type_confidence", "event_type_suggestion_reason"),
+        ("canonical_event_title", "canonical_event_title", "suggested_event_title", "event_title_confidence", "event_title_suggestion_reason"),
+    ]
+    for _field_name, updated_key, suggested_key, confidence_key, reason_key in field_specs:
+        old_value = previous.get(updated_key)
+        new_value = updated.get(updated_key)
+        if (old_value or None) == (new_value or None):
+            continue
+        suggested_value = enriched.get(suggested_key)
+        action = _determine_correction_action(
+            old_value=old_value,
+            new_value=new_value,
+            suggested_value=suggested_value,
+            previous_moderation_reason=previous.get("moderation_reason"),
+            action_override=action_override,
+        )
+        cur.execute(
+            """
+            INSERT INTO app.event_moderation_corrections (
+                event_id, field_name, original_value, suggested_value, final_value,
+                suggestion_confidence, suggestion_reason, action, source_domain, event_title, event_type,
+                created_by
+            )
+            VALUES (
+                %s::uuid, %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''),
+                %s, NULLIF(%s, ''), %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, '')
+            )
+            """,
+            (
+                event_id,
+                updated_key,
+                old_value,
+                suggested_value,
+                new_value,
+                enriched.get(confidence_key),
+                enriched.get(reason_key),
+                action,
+                enriched.get("source_domain"),
+                enriched.get("event_title"),
+                enriched.get("event_type"),
+                actor,
+            ),
+        )
+
+
+def _update_learned_rules_from_moderation(
+    cur: psycopg.Cursor, *, enriched: dict[str, Any], previous: dict[str, Any], updated: dict[str, Any]
+) -> None:
+    if not _relation_exists(cur.connection, "app", "event_learned_rules"):
+        return
+    source_domain = enriched.get("source_domain")
+    haystack = f"{enriched.get('event_title') or ''} {enriched.get('description') or ''}".strip().lower()
+    title_pattern = (enriched.get("event_title") or "").strip().lower()
+    for field_name, key, suggested_key, pattern in (
+        ("event_type", "event_type", "suggested_event_type", haystack),
+        ("event_title", "canonical_event_title", "suggested_event_title", title_pattern),
+    ):
+        old_value = previous.get(key)
+        new_value = updated.get(key)
+        suggested_value = enriched.get(suggested_key)
+        if (old_value or None) == (new_value or None):
+            continue
+        if not pattern or not suggested_value:
+            continue
+        accepted = 1 if (new_value or "").strip() == (suggested_value or "").strip() else 0
+        rejected = 1 - accepted
+        cur.execute(
+            """
+            INSERT INTO app.event_learned_rules (
+                field_name, pattern, suggested_value, support_count, accepted_count, rejected_count,
+                confidence, source_domain, updated_at
+            )
+            VALUES (
+                %s, %s, %s, 1, %s, %s, (%s + 2.0) / (1 + 4.0), NULLIF(%s, ''), now()
+            )
+            ON CONFLICT (field_name, pattern, suggested_value, source_domain)
+            DO UPDATE SET
+                support_count = app.event_learned_rules.support_count + 1,
+                accepted_count = app.event_learned_rules.accepted_count + EXCLUDED.accepted_count,
+                rejected_count = app.event_learned_rules.rejected_count + EXCLUDED.rejected_count,
+                confidence = (
+                    (app.event_learned_rules.accepted_count + EXCLUDED.accepted_count + 2.0)
+                    / (app.event_learned_rules.support_count + 1 + 4.0)
+                ),
+                updated_at = now()
+            """,
+            (field_name, pattern, suggested_value, accepted, rejected, accepted, source_domain),
+        )
 
 
 def _queue_status_filter(status: str) -> str:
@@ -713,6 +942,7 @@ def create_data_quality_flag(payload: DataQualityFlagPayload) -> dict[str, Any]:
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                learned_rules = _load_event_learned_rules(cur)
                 cur.execute(
                     """
                     INSERT INTO app.data_quality_flags (
@@ -882,6 +1112,7 @@ def list_artists(
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                learned_rules = _load_event_learned_rules(cur)
                 cur.execute(
                     f"""
                     SELECT ap.artist_name, ap.source_domain, ap.profile_url, ap.original_artist_bio,
@@ -997,6 +1228,7 @@ def list_admin_events(
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
+                learned_rules = _load_event_learned_rules(cur)
                 cur.execute(
                     f"""
                     SELECT event_id, event_title, original_event_title, canonical_event_title,
@@ -1012,7 +1244,7 @@ def list_admin_events(
                     tuple(params),
                 )
                 rows = cur.fetchall()
-        return [_enrich_event_record(row) for row in _serialize_rows(rows)]
+        return [_enrich_event_record(row, learned_rules=learned_rules) for row in _serialize_rows(rows)]
     except HTTPException:
         raise
     except Exception as exc:
@@ -1024,6 +1256,7 @@ def list_admin_events(
 def get_admin_event(event_id: str) -> dict[str, Any]:
     with get_conn() as conn:
         with conn.cursor() as cur:
+            learned_rules = _load_event_learned_rules(cur)
             cur.execute(
                 """
                 SELECT event_id, source_name, source_domain, source_url, source_record_id,
@@ -1056,7 +1289,117 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
                 (event_id,),
             )
             linked_artists = cur.fetchall()
-    return {"event": _enrich_event_record(_serialize_row(event_row)), "linked_artists": _serialize_rows(linked_artists)}
+    return {
+        "event": _enrich_event_record(_serialize_row(event_row), learned_rules=learned_rules),
+        "linked_artists": _serialize_rows(linked_artists),
+    }
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _smoothed_confidence(accepted_count: int, support_count: int) -> float:
+    return (accepted_count + 2) / (support_count + 4)
+
+
+@app.post("/api/admin/events/auto-apply-suggestions")
+def auto_apply_event_suggestions(payload: AutoApplySuggestionsPayload) -> dict[str, Any]:
+    auto_enabled = _env_bool("EVENT_AUTO_APPLY_ENABLED", False)
+    type_threshold = _env_float("EVENT_TYPE_AUTO_APPLY_THRESHOLD", 0.93)
+    title_threshold = _env_float("EVENT_TITLE_AUTO_APPLY_THRESHOLD", 0.96)
+    queue = payload.queue if payload.queue in {"needs_review", "all"} else "needs_review"
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            learned_rules = _load_event_learned_rules(cur)
+            where = [
+                "COALESCE(is_approved, false) = false",
+                "COALESCE(is_hidden, false) = false",
+            ]
+            if queue == "needs_review":
+                where.append("COALESCE(moderation_override_exists, false) = false")
+            where_sql = " AND ".join(where)
+            cur.execute(
+                f"""
+                SELECT event_id, event_title, description, source_domain, event_type, canonical_event_title,
+                       canonical_event_type, is_hidden, is_approved
+                FROM app.event_records
+                WHERE {where_sql}
+                ORDER BY crawl_timestamp DESC NULLS LAST, created_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                (payload.limit,),
+            )
+            base_rows = [_serialize_row(row) for row in (cur.fetchall() or [])]
+
+            eligible = 0
+            would_update = 0
+            updated = 0
+            examples: list[dict[str, Any]] = []
+            for row in base_rows:
+                enriched = _enrich_event_record(row, learned_rules=learned_rules)
+                updates: dict[str, Any] = {}
+                if (
+                    not enriched.get("event_type")
+                    and enriched.get("suggested_event_type")
+                    and float(enriched.get("event_type_confidence") or 0) >= type_threshold
+                ):
+                    updates["event_type"] = enriched["suggested_event_type"]
+                if (
+                    not (enriched.get("canonical_event_title") or "").strip()
+                    and enriched.get("suggested_event_title")
+                    and float(enriched.get("event_title_confidence") or 0) >= title_threshold
+                    and _is_safe_title_change(enriched.get("event_title"), enriched.get("suggested_event_title"))
+                ):
+                    updates["canonical_event_title"] = enriched["suggested_event_title"]
+                if not updates:
+                    continue
+                eligible += 1
+                would_update += 1
+                if len(examples) < 10:
+                    examples.append(
+                        {
+                            "event_id": enriched["event_id"],
+                            "event_title": enriched.get("event_title"),
+                            "updates": updates,
+                        }
+                    )
+                if payload.dry_run:
+                    continue
+                if not auto_enabled:
+                    continue
+                moderation_reason = "auto_applied: high_confidence_suggestion"
+                _upsert_event_moderation(
+                    cur,
+                    enriched["event_id"],
+                    EventModerationPayload(**updates, moderation_reason=moderation_reason),
+                    actor="auto_apply",
+                    action_override="auto_applied",
+                )
+                updated += 1
+        conn.commit()
+
+    return {
+        "dry_run": payload.dry_run,
+        "eligible": eligible,
+        "would_update": would_update,
+        "updated": updated,
+        "examples": examples,
+    }
 
 
 @app.patch("/api/admin/events/{event_id}/moderation")

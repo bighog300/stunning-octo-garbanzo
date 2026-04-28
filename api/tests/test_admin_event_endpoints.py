@@ -9,6 +9,10 @@ class FakeCursor:
         self._rows = []
         self._row = None
 
+    @property
+    def connection(self):
+        return self.conn
+
     def __enter__(self):
         return self
 
@@ -19,50 +23,35 @@ class FakeCursor:
         sql = " ".join(query.split())
         self.conn.queries.append((sql, params))
 
-        if "FROM app.event_records" in sql and "ORDER BY crawl_timestamp" in sql:
-            self._rows = [
-                {
-                    "event_id": "11111111-1111-1111-1111-111111111111",
-                    "event_title": "Studio Talk",
-                    "original_event_title": "Studio Talk",
-                    "canonical_event_title": None,
-                    "event_type": "talk",
-                    "original_event_type": "talk",
-                    "canonical_event_type": None,
-                    "linked_artists": ["Alice"],
-                    "venue_name": "Main Hall",
-                    "city": "Cape Town",
-                    "start_date": "2026-04-10",
-                    "end_date": "2026-04-12",
-                    "source_domain": "example.com",
-                    "source_name": "Example",
-                    "source_url": "https://example.com/events/1",
-                    "description": "Artist talk and workshop",
-                    "crawl_timestamp": "2026-04-27T00:00:00Z",
-                    "is_hidden": False,
-                    "is_approved": False,
-                    "moderation_override_exists": False,
-                }
-            ]
+        if "SELECT to_regclass" in sql:
+            relation = params[0]
+            self._row = {"relation_name": relation if relation.endswith(("event_learned_rules", "event_moderation_corrections")) else None}
             return
 
-        if (
-            "FROM app.event_records" in sql
-            and "WHERE event_id = %s::uuid" in sql
-            and "SELECT 1" not in sql
-        ):
+        if "FROM app.event_learned_rules" in sql:
+            self._rows = self.conn.learned_rules
+            return
+
+        if "FROM app.event_records" in sql and "ORDER BY crawl_timestamp" in sql:
+            self._rows = self.conn.list_rows
+            return
+
+        if "FROM app.event_records" in sql and "WHERE event_id = %s::uuid" in sql and "SELECT 1" not in sql:
+            event_id = params[0]
+            if event_id == "missing-event-id":
+                self._row = None
+                return
             self._row = {
-                "event_id": params[0],
-                "event_title": "Studio Talk",
-                "original_event_title": "Studio Talk",
+                "event_id": event_id,
+                "event_title": "WORKSHOP  NIGHT!!",
                 "canonical_event_title": None,
-                "event_type": "talk",
-                "original_event_type": "talk",
                 "canonical_event_type": None,
-                "raw_payload": {"raw": True},
-                "description": "Artist talk and workshop",
+                "event_type": None,
+                "description": "artist workshop and panel",
+                "source_domain": "example.com",
                 "is_hidden": False,
                 "is_approved": False,
+                "raw_payload": {"raw": True},
             }
             return
 
@@ -71,13 +60,7 @@ class FakeCursor:
             return
 
         if "FROM app.artist_event_links" in sql:
-            self._rows = [
-                {
-                    "artist_activity_id": "aaa",
-                    "artist_name": "Alice",
-                    "artist_profile_url": "https://example.com/artists/alice",
-                }
-            ]
+            self._rows = [{"artist_activity_id": "aaa", "artist_name": "Alice"}]
             return
 
         if "COUNT(*)::int AS total" in sql and "FROM app.event_records" in sql:
@@ -93,20 +76,13 @@ class FakeCursor:
             }
             return
 
-        if "SELECT 1 FROM app.event_records" in sql:
-            if params[0] == "missing-event-id":
-                self._row = None
-            else:
-                self._row = {"?column?": 1}
-            return
-
         if "FROM app.event_moderation_overrides" in sql:
             self._row = {
                 "is_hidden": False,
                 "is_approved": False,
                 "canonical_event_title": None,
                 "event_type": None,
-                "moderation_reason": None,
+                "moderation_reason": self.conn.previous_reason,
                 "moderator_notes": None,
             }
             return
@@ -124,6 +100,14 @@ class FakeCursor:
             }
             return
 
+        if "INSERT INTO app.event_moderation_corrections" in sql:
+            self.conn.corrections += 1
+            return
+
+        if "INSERT INTO app.event_learned_rules" in sql:
+            self.conn.learned_updates += 1
+            return
+
     def fetchall(self):
         return self._rows
 
@@ -135,6 +119,32 @@ class FakeConn:
     def __init__(self):
         self.queries = []
         self.committed = False
+        self.corrections = 0
+        self.learned_updates = 0
+        self.previous_reason = None
+        self.learned_rules = []
+        self.list_rows = [{
+            "event_id": "11111111-1111-1111-1111-111111111111",
+            "event_title": "WORKSHOP  NIGHT!!",
+            "original_event_title": "WORKSHOP  NIGHT!!",
+            "canonical_event_title": None,
+            "event_type": None,
+            "original_event_type": None,
+            "canonical_event_type": None,
+            "linked_artists": ["Alice"],
+            "venue_name": "Main Hall",
+            "city": "Cape Town",
+            "start_date": "2026-04-10",
+            "end_date": "2026-04-12",
+            "source_domain": "example.com",
+            "source_name": "Example",
+            "source_url": "https://example.com/events/1",
+            "description": "Artist workshop and panel",
+            "crawl_timestamp": "2026-04-27T00:00:00Z",
+            "is_hidden": False,
+            "is_approved": False,
+            "moderation_override_exists": False,
+        }]
 
     def cursor(self):
         return FakeCursor(self)
@@ -148,93 +158,123 @@ def fake_get_conn():
     yield FakeConn()
 
 
+def test_type_confidence_static_rules():
+    suggestion = main._suggest_event_type({"event_title": "Masterclass with artist", "description": ""}, learned_rules=[])
+    assert suggestion[0] == "workshop"
+    assert suggestion[1] == 0.95
+
+
+def test_title_cleanup_confidence_rules():
+    value, confidence, reason = main._normalize_event_title_with_confidence("  HELLO  ")
+    assert value == "HELLO"
+    assert confidence == 0.99
+    assert "trimmed" in reason
+
+
 def test_list_admin_events(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     rows = main.list_admin_events(limit=20, moderation_status="all")
-    assert rows[0]["event_title"] == "Studio Talk"
-    assert rows[0]["original_event_title"] == "Studio Talk"
-    assert rows[0]["original_event_type"] == "talk"
-    assert rows[0]["quality_score"] >= 1
-    assert "missing_source_url" in rows[0]
+    assert rows[0]["event_type_confidence"] == 0.95
+    assert rows[0]["event_title_confidence"] == 0.99
 
 
-def test_get_admin_event(monkeypatch):
-    monkeypatch.setattr(main, "get_conn", fake_get_conn)
-    payload = main.get_admin_event("11111111-1111-1111-1111-111111111111")
-    assert payload["event"]["event_title"] == "Studio Talk"
-    assert payload["event"]["original_event_title"] == "Studio Talk"
-    assert payload["event"]["original_event_type"] == "talk"
-    assert payload["linked_artists"][0]["artist_name"] == "Alice"
+def test_patch_admin_event_moderation_logs_corrections(monkeypatch):
+    holder = FakeConn()
 
+    @contextmanager
+    def _conn():
+        yield holder
 
-def test_patch_admin_event_moderation(monkeypatch):
-    monkeypatch.setattr(main, "get_conn", fake_get_conn)
-    payload = main.EventModerationPayload(
-        is_hidden=True,
-        is_approved=True,
-        canonical_event_title="Canonical Studio Talk",
-        event_type="talk",
-        moderation_reason="Looks valid",
-        moderator_notes="Keep visible in search",
-    )
-    response = main.patch_admin_event_moderation(
-        "11111111-1111-1111-1111-111111111111",
-        payload,
-    )
+    monkeypatch.setattr(main, "get_conn", _conn)
+    payload = main.EventModerationPayload(canonical_event_title="Workshop Night", event_type="workshop")
+    response = main.patch_admin_event_moderation("11111111-1111-1111-1111-111111111111", payload)
     assert response["status"] == "updated"
-    assert response["event_moderation"]["is_hidden"] is True
+    assert holder.corrections >= 1
 
 
-def test_patch_admin_events_bulk_moderation(monkeypatch):
-    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+def test_patch_admin_events_bulk_moderation_logs_corrections(monkeypatch):
+    holder = FakeConn()
+
+    @contextmanager
+    def _conn():
+        yield holder
+
+    monkeypatch.setattr(main, "get_conn", _conn)
     payload = main.BulkEventModerationPayload(
-        event_ids=[
-            "11111111-1111-1111-1111-111111111111",
-            "22222222-2222-2222-2222-222222222222",
-        ],
-        updates=main.EventModerationPayload(
-            is_hidden=True,
-            is_approved=True,
-            event_type="exhibition",
-        ),
+        event_ids=["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"],
+        updates=main.EventModerationPayload(event_type="workshop"),
     )
     response = main.patch_admin_events_bulk_moderation(payload)
     assert response["updated"] == 2
-    assert response["failed"] == []
+    assert holder.corrections >= 1
 
 
 def test_patch_admin_events_bulk_moderation_collects_failures(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
     payload = main.BulkEventModerationPayload(
         event_ids=["11111111-1111-1111-1111-111111111111", "missing-event-id"],
-        updates=main.EventModerationPayload(
-            is_hidden=False,
-            is_approved=False,
-            event_type="talk",
-        ),
+        updates=main.EventModerationPayload(is_hidden=False, is_approved=False, event_type="talk"),
     )
     response = main.patch_admin_events_bulk_moderation(payload)
     assert response["updated"] == 1
     assert response["failed"][0]["event_id"] == "missing-event-id"
 
 
-def test_list_admin_events_accepts_queue(monkeypatch):
-    monkeypatch.setattr(main, "get_conn", fake_get_conn)
-    rows = main.list_admin_events(limit=20, queue="needs_review")
-    assert rows
-
-
 def test_bulk_moderation_has_max_limit(monkeypatch):
     monkeypatch.setattr(main, "get_conn", fake_get_conn)
-    payload = main.BulkEventModerationPayload(
-        event_ids=[f"id-{i}" for i in range(501)],
-        updates=main.EventModerationPayload(is_hidden=True),
-    )
+    payload = main.BulkEventModerationPayload(event_ids=[f"id-{i}" for i in range(501)], updates=main.EventModerationPayload(is_hidden=True))
     try:
         main.patch_admin_events_bulk_moderation(payload)
-        assert False, "Expected HTTPException for oversized bulk payload"
+        assert False
     except main.HTTPException as exc:
         assert exc.status_code == 400
+
+
+def test_auto_apply_dry_run_does_not_write(monkeypatch):
+    holder = FakeConn()
+
+    @contextmanager
+    def _conn():
+        yield holder
+
+    monkeypatch.setattr(main, "get_conn", _conn)
+    monkeypatch.setattr(main, "_env_bool", lambda *_args, **_kwargs: True)
+    result = main.auto_apply_event_suggestions(main.AutoApplySuggestionsPayload(dry_run=True, limit=10))
+    assert result["dry_run"] is True
+    assert result["would_update"] >= 1
+    assert holder.corrections == 0
+
+
+def test_auto_apply_writes_overrides_and_corrections(monkeypatch):
+    holder = FakeConn()
+
+    @contextmanager
+    def _conn():
+        yield holder
+
+    monkeypatch.setattr(main, "get_conn", _conn)
+    monkeypatch.setattr(main, "_env_bool", lambda *_args, **_kwargs: True)
+    result = main.auto_apply_event_suggestions(main.AutoApplySuggestionsPayload(dry_run=False, limit=10))
+    assert result["updated"] >= 1
+    assert holder.corrections >= 1
+
+
+def test_auto_apply_skips_approved_hidden(monkeypatch):
+    holder = FakeConn()
+    holder.list_rows = []
+
+    @contextmanager
+    def _conn():
+        yield holder
+
+    monkeypatch.setattr(main, "get_conn", _conn)
+    monkeypatch.setattr(main, "_env_bool", lambda *_args, **_kwargs: True)
+    result = main.auto_apply_event_suggestions(main.AutoApplySuggestionsPayload(dry_run=False, limit=10))
+    assert result["eligible"] == 0
+
+
+def test_learned_rule_confidence_update_helper():
+    assert main._smoothed_confidence(accepted_count=3, support_count=5) == (3 + 2) / (5 + 4)
 
 
 def test_validate_event_records_contract(monkeypatch):

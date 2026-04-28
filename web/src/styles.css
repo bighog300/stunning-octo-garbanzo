@@ -193,3 +193,19 @@ button { width: fit-content; padding: 8px 12px; }
   background: #e8f5e9;
   color: #1e6e39;
 }
+
+.auto-apply-panel {
+  background: #f0f7ff;
+  border: 1px solid #cfe3ff;
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.auto-badge {
+  display: inline-block;
+  background: #e6ffed;
+  color: #137333;
+  border-radius: 999px;
+  padding: 2px 8px;
+}
