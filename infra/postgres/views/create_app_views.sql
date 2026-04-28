@@ -95,7 +95,7 @@ WITH linked_artists AS (
     SELECT
         event_id,
         array_agg(DISTINCT artist_name ORDER BY artist_name) FILTER (WHERE artist_name IS NOT NULL) AS linked_artists
-    FROM analytics.mart_artist_activity
+    FROM analytics.mart_event_artists
     GROUP BY event_id
 ),
 events_with_source_title AS (
@@ -127,7 +127,7 @@ SELECT
     me.image_url,
     re.raw_payload,
     COALESCE(la.linked_artists, ARRAY[]::TEXT[]) AS linked_artists,
-    me.artist_count,
+    COALESCE(cardinality(la.linked_artists), 0)::integer AS artist_count,
     COALESCE(emo.is_hidden, false) AS is_hidden,
     COALESCE(emo.is_approved, false) AS is_approved,
     (emo.id IS NOT NULL) AS moderation_override_exists,
@@ -419,22 +419,36 @@ LEFT JOIN app.gallery_moderation_overrides gmo
 
 CREATE OR REPLACE VIEW app.artist_event_links AS
 SELECT
-    artist_activity_id,
-    event_id,
-    artist_name,
-    artist_name_normalized,
-    artist_profile_url,
-    match_type,
-    event_type,
-    event_title,
-    city,
-    country,
-    start_date,
-    end_date,
-    source_domain,
-    source_url,
-    crawl_timestamp
-FROM analytics.mart_artist_activity;
+    md5(mea.event_id::text || ':' || mea.artist_id::text)::uuid AS artist_activity_id,
+    mea.event_id,
+    mea.artist_name,
+    trim(
+        regexp_replace(
+            regexp_replace(
+                regexp_replace(lower(mea.artist_name), '[^a-z0-9\s]', ' ', 'g'),
+                '\s+',
+                ' ',
+                'g'
+            ),
+            '\m(artist|studio)\M',
+            '',
+            'g'
+        )
+    ) AS artist_name_normalized,
+    NULL::text AS artist_profile_url,
+    mea.match_type,
+    me.event_type,
+    me.event_title,
+    me.city,
+    me.country,
+    me.start_date,
+    me.end_date,
+    me.source_domain,
+    me.source_url,
+    me.crawl_timestamp
+FROM analytics.mart_event_artists mea
+INNER JOIN analytics.mart_events me
+    ON me.event_id = mea.event_id;
 
 CREATE OR REPLACE VIEW app.artist_profiles AS
 WITH artist_rollup AS (

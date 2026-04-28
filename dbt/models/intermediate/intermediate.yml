@@ -13,3 +13,23 @@ models:
         tests:
           - not_null
           - unique
+
+
+  - name: int_artist_normalized
+    columns:
+      - name: artist_id
+        tests:
+          - not_null
+          - unique
+      - name: normalized_artist_name
+        tests:
+          - not_null
+
+  - name: int_event_artist_matches
+    columns:
+      - name: event_id
+        tests:
+          - not_null
+      - name: artist_id
+        tests:
+          - not_null

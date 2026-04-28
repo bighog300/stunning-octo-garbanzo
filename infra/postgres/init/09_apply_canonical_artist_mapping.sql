@@ -103,22 +103,36 @@ LEFT JOIN latest_approval la
 
 CREATE VIEW app.artist_event_links AS
 SELECT
-    artist_activity_id,
-    event_id,
-    artist_name,
-    artist_name_normalized,
-    artist_profile_url,
-    match_type,
-    event_type,
-    event_title,
-    city,
-    country,
-    start_date,
-    end_date,
-    source_domain,
-    source_url,
-    crawl_timestamp
-FROM analytics.mart_artist_activity;
+    md5(mea.event_id::text || ':' || mea.artist_id::text)::uuid AS artist_activity_id,
+    mea.event_id,
+    mea.artist_name,
+    trim(
+        regexp_replace(
+            regexp_replace(
+                regexp_replace(lower(mea.artist_name), '[^a-z0-9\s]', ' ', 'g'),
+                '\s+',
+                ' ',
+                'g'
+            ),
+            '\m(artist|studio)\M',
+            '',
+            'g'
+        )
+    ) AS artist_name_normalized,
+    NULL::text AS artist_profile_url,
+    mea.match_type,
+    me.event_type,
+    me.event_title,
+    me.city,
+    me.country,
+    me.start_date,
+    me.end_date,
+    me.source_domain,
+    me.source_url,
+    me.crawl_timestamp
+FROM analytics.mart_event_artists mea
+INNER JOIN analytics.mart_events me
+    ON me.event_id = mea.event_id;
 
 CREATE VIEW app.artist_profiles AS
 WITH artist_rollup AS (

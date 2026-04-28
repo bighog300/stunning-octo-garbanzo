@@ -225,6 +225,7 @@ EVENT_RECORD_REQUIRED_COLUMNS = [
     "end_date",
     "venue_name",
     "linked_artists",
+    "artist_count",
     "is_hidden",
     "is_approved",
     "moderation_reason",
@@ -383,6 +384,7 @@ def _enrich_event_record(
     has_start_date = bool(event.get("start_date"))
     has_venue = bool((event.get("venue_name") or "").strip())
     has_artists = isinstance(linked_artists, list) and len(linked_artists) > 0
+    linked_artist_count = int(event.get("artist_count") or (len(linked_artists) if isinstance(linked_artists, list) else 0))
     has_description = bool((event.get("description") or "").strip())
     has_source_url = bool((event.get("source_url") or "").strip())
     end_before_start = bool(
@@ -397,6 +399,9 @@ def _enrich_event_record(
         quality_flags.append("missing_venue")
     if not has_artists:
         quality_flags.append("missing_artists")
+        quality_flags.append("no_linked_artists")
+    if linked_artist_count > 3:
+        quality_flags.append("multiple_artist_match")
     if not has_description:
         quality_flags.append("missing_description")
     if not has_source_url:
@@ -418,6 +423,8 @@ def _enrich_event_record(
         "missing_date": not has_start_date,
         "missing_venue": not has_venue,
         "missing_artists": not has_artists,
+        "no_linked_artists": linked_artist_count == 0,
+        "multiple_artist_match": linked_artist_count > 3,
         "missing_description": not has_description,
         "missing_source_url": not has_source_url,
         "end_before_start": end_before_start,
@@ -1350,6 +1357,7 @@ def list_admin_events(
     missing_venue: bool = False,
     search: str | None = None,
     include_hidden: bool = True,
+    has_linked_artists: bool | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(offset, int):
         offset = 0
@@ -1412,6 +1420,10 @@ def list_admin_events(
         where_clauses.append("start_date IS NULL AND end_date IS NULL")
     if missing_venue:
         where_clauses.append("(venue_name IS NULL OR btrim(venue_name) = '')")
+    if has_linked_artists is True:
+        where_clauses.append("COALESCE(artist_count, 0) > 0")
+    elif has_linked_artists is False:
+        where_clauses.append("COALESCE(artist_count, 0) = 0")
     if search:
         where_clauses.append(
             "(event_title ILIKE %s OR canonical_event_title ILIKE %s OR source_url ILIKE %s)"
@@ -1429,7 +1441,7 @@ def list_admin_events(
                     f"""
                     SELECT event_id, event_title, original_event_title, canonical_event_title,
                            event_type, original_event_type, canonical_event_type,
-                           linked_artists, venue_name, city, country,
+                           linked_artists, artist_count, venue_name, city, country,
                            start_date, end_date, description, source_name, source_domain, source_url, crawl_timestamp,
                            is_hidden, is_approved, moderation_override_exists, moderation_reason, updated_at
                     FROM app.event_records
