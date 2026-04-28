@@ -109,6 +109,33 @@ function getAdminEvent(eventId) {
   return api(`/api/admin/events/${encodeURIComponent(eventId)}`)
 }
 
+function getAdminGalleries(filters = {}) {
+  const params = new URLSearchParams()
+  Object.entries(filters).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') return
+    params.set(key, String(value))
+  })
+  return api(`/api/admin/galleries?${params.toString()}`)
+}
+
+function getAdminGallery(galleryId) {
+  return api(`/api/admin/galleries/${encodeURIComponent(galleryId)}`)
+}
+
+function patchGalleryModeration(galleryId, payload) {
+  return api(`/api/admin/galleries/${encodeURIComponent(galleryId)}/moderation`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+function patchBulkGalleryModeration(payload) {
+  return api('/api/admin/galleries/bulk-moderation', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
 function patchEventModeration(eventId, payload) {
   return api(`/api/admin/events/${encodeURIComponent(eventId)}/moderation`, {
     method: 'PATCH',
@@ -166,6 +193,7 @@ function Nav() {
       <Link to="/artists">Artists</Link>
       <Link to="/moderation">Moderation</Link>
       <Link to="/admin/events">Events</Link>
+      <Link to="/admin/galleries">Galleries</Link>
       <Link to="/admin/moderation-dashboard">Dashboard</Link>
     </nav>
   )
@@ -1263,6 +1291,14 @@ function AdminEventDetailPage() {
           ))}
         </ul>
       )}
+      {detail.linked_gallery && (
+        <p>
+          <strong>Gallery:</strong>{' '}
+          <Link to={`/admin/galleries/${detail.linked_gallery.gallery_id}`}>
+            {detail.linked_gallery.gallery_name || detail.linked_gallery.gallery_id}
+          </Link>
+        </p>
+      )}
 
       <h3>Moderation controls</h3>
       <div className="action-row">
@@ -1299,6 +1335,166 @@ function AdminEventDetailPage() {
   )
 }
 
+function AdminGalleriesPage() {
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [rows, setRows] = React.useState([])
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState('')
+  const [selected, setSelected] = React.useState(new Set())
+  const [saving, setSaving] = React.useState(false)
+
+  const filters = React.useMemo(() => ({
+    queue: searchParams.get('queue') || 'needs_review',
+    search: searchParams.get('search') || '',
+    source_domain: searchParams.get('source_domain') || '',
+    missing_address: searchParams.get('missing_address') === 'true',
+    missing_city: searchParams.get('missing_city') === 'true',
+    missing_country: searchParams.get('missing_country') === 'true',
+    include_hidden: searchParams.get('include_hidden') !== 'false',
+    limit: 100,
+    offset: 0,
+  }), [searchParams])
+
+  React.useEffect(() => {
+    setLoading(true)
+    getAdminGalleries(filters)
+      .then((json) => { setRows(Array.isArray(json) ? json : []); setSelected(new Set()) })
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [filters])
+
+  const queueTabs = ['needs_review', 'low_quality', 'recent', 'approved', 'hidden', 'edited', 'all']
+
+  function updateFilter(key, value) {
+    const next = new URLSearchParams(searchParams)
+    if (value === '' || value === null) next.delete(key)
+    else next.set(key, String(value))
+    setSearchParams(next)
+  }
+
+  function toggleSelect(id, checked) {
+    setSelected((current) => {
+      const next = new Set(current)
+      if (checked) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  async function runBulk(updates) {
+    if (selected.size === 0) return
+    setSaving(true)
+    try {
+      await patchBulkGalleryModeration({ gallery_ids: Array.from(selected), updates })
+      setRows((current) => current.map((row) => (selected.has(row.gallery_id) ? { ...row, ...updates } : row)))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section>
+      <h2>Galleries moderation</h2>
+      <div className="queue-tabs">
+        {queueTabs.map((queue) => <button key={queue} className={filters.queue === queue ? 'active-tab' : ''} onClick={() => updateFilter('queue', queue)}>{queue.replace('_', ' ')}</button>)}
+      </div>
+      <div className="controls">
+        <input type="search" placeholder="Search galleries" value={filters.search} onChange={(e) => updateFilter('search', e.target.value)} />
+        <input type="text" placeholder="Source domain" value={filters.source_domain} onChange={(e) => updateFilter('source_domain', e.target.value)} />
+        <label><input type="checkbox" checked={filters.missing_address} onChange={(e) => updateFilter('missing_address', e.target.checked)} /> Missing address</label>
+        <label><input type="checkbox" checked={filters.missing_city} onChange={(e) => updateFilter('missing_city', e.target.checked)} /> Missing city</label>
+        <label><input type="checkbox" checked={filters.missing_country} onChange={(e) => updateFilter('missing_country', e.target.checked)} /> Missing country</label>
+      </div>
+      {loading && <p>Loading galleries…</p>}
+      {error && <p className="error-text">{error}</p>}
+      {!loading && !error && (
+        <table>
+          <thead>
+            <tr>
+              <th />
+              <th>Gallery</th>
+              <th>City</th>
+              <th>Country</th>
+              <th>Source</th>
+              <th>Quality</th>
+              <th>Flags</th>
+              <th>Moderation</th>
+            </tr>
+          </thead>
+          <tbody>
+            {selected.size > 0 && (
+              <tr><td colSpan={8}><div className="action-row"><strong>{selected.size} selected</strong><button disabled={saving} onClick={() => runBulk({ is_approved: true, is_hidden: false })}>Approve</button><button disabled={saving} onClick={() => runBulk({ is_hidden: true })}>Hide</button><button disabled={saving} onClick={() => runBulk({ is_hidden: false })}>Unhide</button></div></td></tr>
+            )}
+            {rows.map((gallery) => (
+              <tr key={gallery.gallery_id}>
+                <td><input type="checkbox" checked={selected.has(gallery.gallery_id)} onChange={(e) => toggleSelect(gallery.gallery_id, e.target.checked)} /></td>
+                <td><Link to={`/admin/galleries/${gallery.gallery_id}`}>{gallery.canonical_gallery_name || gallery.gallery_name || 'Unknown gallery'}</Link></td>
+                <td>{gallery.city || '—'}</td>
+                <td>{gallery.country || '—'}</td>
+                <td>{gallery.source_domain || '—'}</td>
+                <td><span className="quality-badge">{gallery.quality_score}/6</span></td>
+                <td>{gallery.quality_flags?.join(', ') || 'ok'}</td>
+                <td>
+                  <label><input type="checkbox" checked={Boolean(gallery.is_approved)} onChange={(e) => patchGalleryModeration(gallery.gallery_id, { is_approved: e.target.checked }).then(() => setRows((cur) => cur.map((row) => row.gallery_id === gallery.gallery_id ? { ...row, is_approved: e.target.checked } : row)))} />Approve</label>
+                  <label><input type="checkbox" checked={Boolean(gallery.is_hidden)} onChange={(e) => patchGalleryModeration(gallery.gallery_id, { is_hidden: e.target.checked }).then(() => setRows((cur) => cur.map((row) => row.gallery_id === gallery.gallery_id ? { ...row, is_hidden: e.target.checked } : row)))} />Hide</label>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+}
+
+function AdminGalleryDetailPage() {
+  const { galleryId = '' } = useParams()
+  const [detail, setDetail] = React.useState(null)
+  const [loading, setLoading] = React.useState(true)
+  const [error, setError] = React.useState('')
+  const [status, setStatus] = React.useState('')
+
+  const load = React.useCallback(() => {
+    setLoading(true)
+    getAdminGallery(galleryId).then(setDetail).catch((err) => setError(err.message)).finally(() => setLoading(false))
+  }, [galleryId])
+  React.useEffect(() => { load() }, [load])
+  if (loading) return <section><h2>Gallery detail</h2><p>Loading…</p></section>
+  if (error || !detail?.gallery) return <section><h2>Gallery detail</h2><p className="error-text">{error || 'Not found'}</p></section>
+  const gallery = detail.gallery
+  async function update(changes) {
+    try {
+      await patchGalleryModeration(galleryId, changes)
+      setStatus('Saved')
+      load()
+    } catch (err) {
+      setStatus(err.message)
+    }
+  }
+  return (
+    <section>
+      <p><Link to="/admin/galleries">← Back to galleries</Link></p>
+      <h2>{gallery.canonical_gallery_name || gallery.gallery_name}</h2>
+      <p><strong>Address:</strong> {gallery.canonical_address || gallery.gallery_address || 'Missing address'}</p>
+      <p><strong>City/Country:</strong> {[gallery.canonical_city || gallery.city, gallery.canonical_country || gallery.country].filter(Boolean).join(', ') || '—'}</p>
+      <div className="action-row">
+        <button onClick={() => update({ is_approved: !gallery.is_approved })}>{gallery.is_approved ? 'Unapprove' : 'Approve'}</button>
+        <button onClick={() => update({ is_hidden: !gallery.is_hidden })}>{gallery.is_hidden ? 'Unhide' : 'Hide'}</button>
+        <button onClick={() => { const val = window.prompt('Canonical gallery name', gallery.canonical_gallery_name || gallery.gallery_name || ''); if (val !== null) update({ canonical_gallery_name: val }) }}>Set canonical name</button>
+      </div>
+      <h3>Linked events</h3>
+      <ul>
+        {(gallery.linked_events || []).map((event) => (
+          <li key={event.event_id}>
+            <Link to={`/admin/events/${event.event_id}`}>{event.event_title || event.event_id}</Link>
+          </li>
+        ))}
+      </ul>
+      {status && <p>{status}</p>}
+    </section>
+  )
+}
+
 function ModerationDashboardPage() {
   const [metrics, setMetrics] = React.useState(null)
   const [error, setError] = React.useState('')
@@ -1320,6 +1516,12 @@ function ModerationDashboardPage() {
             <p><strong>{value}</strong></p>
           </article>
         ))}
+        {Object.entries(metrics.galleries || {}).map(([key, value]) => (
+          <article key={`gallery-${key}`} className="moderation-card">
+            <h3>gallery {key.replaceAll('_', ' ')}</h3>
+            <p><strong>{value}</strong></p>
+          </article>
+        ))}
       </div>
     </section>
   )
@@ -1337,6 +1539,8 @@ function App() {
         <Route path="/moderation" element={<ModerationPage />} />
         <Route path="/admin/events" element={<AdminEventsPage />} />
         <Route path="/admin/events/:eventId" element={<AdminEventDetailPage />} />
+        <Route path="/admin/galleries" element={<AdminGalleriesPage />} />
+        <Route path="/admin/galleries/:galleryId" element={<AdminGalleryDetailPage />} />
         <Route path="/admin/moderation-dashboard" element={<ModerationDashboardPage />} />
         <Route path="/artworks/:artworkId" element={<ArtworkDetailPage />} />
       </Routes>

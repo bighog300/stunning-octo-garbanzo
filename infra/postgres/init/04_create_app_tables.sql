@@ -140,3 +140,21 @@ CREATE TABLE IF NOT EXISTS app.event_learned_rules (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (field_name, pattern, suggested_value, source_domain)
 );
+
+CREATE TABLE IF NOT EXISTS app.gallery_moderation_overrides (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    gallery_id UUID NOT NULL UNIQUE,
+    is_hidden BOOLEAN NOT NULL DEFAULT false,
+    is_approved BOOLEAN NOT NULL DEFAULT false,
+    canonical_gallery_name TEXT,
+    canonical_gallery_type TEXT,
+    canonical_address TEXT,
+    canonical_city TEXT,
+    canonical_country TEXT,
+    moderation_reason TEXT,
+    moderator_notes TEXT,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gallery_moderation_overrides_updated_at
+ON app.gallery_moderation_overrides (updated_at DESC);
