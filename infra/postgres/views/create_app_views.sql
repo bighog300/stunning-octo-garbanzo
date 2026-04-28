@@ -149,7 +149,7 @@ WITH scraped AS (
     SELECT
         mg.gallery_id,
         mg.gallery_name,
-        mg.gallery_name AS original_gallery_name,
+        mg.original_gallery_name,
         lower(regexp_replace(COALESCE(mg.gallery_name, ''), '\s+', ' ', 'g')) AS normalized_gallery_name,
         mg.gallery_address,
         mg.city,

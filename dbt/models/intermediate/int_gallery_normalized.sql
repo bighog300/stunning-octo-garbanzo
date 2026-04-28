@@ -4,22 +4,92 @@ with base as (
         source_domain,
         source_url,
         source_record_id,
-        initcap(gallery_name) as gallery_name,
+        gallery_name as original_gallery_name,
+        regexp_replace(
+            btrim(
+                case
+                    when lower(coalesce(nullif(btrim(source_domain), ''), '')) = 'art.co.za' then
+                        regexp_replace(
+                            btrim(gallery_name),
+                            '\s*\|\s*Art\.co\.za(?:\s+Art\s+Gallery\s+Listings)?\s*$',
+                            '',
+                            'i'
+                        )
+                    else btrim(gallery_name)
+                end
+            ),
+            '\s+',
+            ' ',
+            'g'
+        ) as gallery_name,
         address,
         city,
         region,
         country,
         regexp_replace(coalesce(phone, ''), '[^0-9+]+', ' ', 'g') as phone_normalized,
         lower(email) as email_normalized,
-        case when website_url ~* '^https?://' then lower(website_url) else lower(concat('https://', website_url)) end as website_url_normalized,
-        regexp_replace(lower(instagram_url), '^https?://(www\.)?instagram\.com/', 'https://instagram.com/') as instagram_url_normalized,
-        regexp_replace(lower(facebook_url), '^https?://(www\.)?facebook\.com/', 'https://facebook.com/') as facebook_url_normalized,
+        case
+            when coalesce(website_url, '') = '' then null
+            when website_url ~* '^https?://' then lower(website_url)
+            else lower(concat('https://', website_url))
+        end as website_url_pre_normalized,
+        regexp_replace(lower(instagram_url), '^https?://(www\.)?instagram\.com/', 'https://instagram.com/') as instagram_url_pre_normalized,
+        regexp_replace(lower(facebook_url), '^https?://(www\.)?facebook\.com/', 'https://facebook.com/') as facebook_url_pre_normalized,
         contact_person,
         description,
         raw_payload,
         crawl_timestamp,
         created_at
     from {{ ref('stg_galleries') }}
+),
+url_params as (
+    select
+        b.raw_gallery_id,
+        string_agg(param, '&' order by ordinality) filter (
+            where param is not null
+              and param <> ''
+              and split_part(param, '=', 1) !~* '^utm_(source|medium|campaign|term|content)$'
+        ) as retained_query
+    from base b
+    left join lateral unnest(string_to_array(split_part(coalesce(b.website_url_pre_normalized, ''), '?', 2), '&')) with ordinality as p(param, ordinality)
+        on true
+    group by b.raw_gallery_id
+),
+normalized as (
+    select
+        b.raw_gallery_id,
+        b.source_domain,
+        b.source_url,
+        b.source_record_id,
+        initcap(nullif(b.gallery_name, '')) as gallery_name,
+        b.original_gallery_name,
+        b.address,
+        b.city,
+        b.region,
+        b.country,
+        b.phone_normalized,
+        b.email_normalized,
+        case
+            when coalesce(b.website_url_pre_normalized, '') = '' then null
+            when coalesce(u.retained_query, '') = '' then split_part(b.website_url_pre_normalized, '?', 1)
+            else concat(split_part(b.website_url_pre_normalized, '?', 1), '?', u.retained_query)
+        end as website_url_normalized,
+        case
+            when regexp_replace(coalesce(b.instagram_url_pre_normalized, ''), '/+$', '') in ('https://instagram.com/artcoza') then null
+            else b.instagram_url_pre_normalized
+        end as instagram_url_normalized,
+        case
+            when regexp_replace(coalesce(b.facebook_url_pre_normalized, ''), '/+$', '') in ('https://facebook.com/artcoza') then null
+            else b.facebook_url_pre_normalized
+        end as facebook_url_normalized,
+        b.contact_person,
+        b.description,
+        b.raw_payload,
+        b.crawl_timestamp,
+        b.created_at
+    from base b
+    left join url_params u
+        on u.raw_gallery_id = b.raw_gallery_id
 ),
 scored as (
     select
@@ -33,7 +103,7 @@ scored as (
             lower(regexp_replace(coalesce(country, ''), '\s+', ' ', 'g')),
             coalesce(source_domain, '')
         ) as normalized_gallery_key
-    from base
+    from normalized
 )
 select
     *,
