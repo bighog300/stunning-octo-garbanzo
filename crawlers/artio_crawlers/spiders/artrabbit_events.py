@@ -48,6 +48,24 @@ class ArtRabbitEventsSpider(scrapy.Spider):
     }
 
     FOOTER_HINTS = {"footer", "site-footer", "global-footer", "bottom-links"}
+    EVENT_PATH_PATTERN = re.compile(r"^/events/[^/]+/?$", re.IGNORECASE)
+    EXCLUDED_PATH_PREFIXES = (
+        "/log-in",
+        "/sign-up",
+        "/users/",
+        "/organisations/",
+        "/artists/",
+        "/saved",
+        "/search",
+    )
+    INVALID_TEXT_VALUES = {
+        "save this event",
+        "login",
+        "artrabbit",
+        "share",
+        "follow",
+        "add to calendar",
+    }
 
     def __init__(
         self,
@@ -124,31 +142,42 @@ class ArtRabbitEventsSpider(scrapy.Spider):
     def parse_detail(self, response: scrapy.http.Response):
         if self._limit_reached():
             return
+        if not self._is_event_detail_url(response.url):
+            return
 
-        title = self._clean(response.css("h1::text, meta[property='og:title']::attr(content), title::text").get())
+        seo_title = self._clean(response.css("title::text, meta[property='og:title']::attr(content)").get())
+        fallback_event_title, fallback_event_type, fallback_venue_name, fallback_city = self._parse_seo_title(seo_title)
+        title = self._first_valid(
+            self._clean(response.css("main h1::text, article h1::text, h1::text").get()),
+            fallback_event_title,
+        )
         page_text = "\n".join(self._text_blocks(response))
         event_type = self._extract_event_type(response, page_text)
+        if event_type == "event" and fallback_event_type:
+            event_type = fallback_event_type
         start_date, end_date, opening_dt = self._extract_dates(response, page_text)
 
         venue_block = response.css("[class*='venue'], [class*='location'], [data-testid*='venue']")
         venue_text = " ".join(t.strip() for t in venue_block.css("::text").getall() if t.strip())
-        venue_name = self._first_non_empty(
+        venue_name = self._first_valid(
             self._clean(response.css("[itemprop='name']::text").get()),
             self._clean(venue_block.css("h2::text, h3::text, strong::text, a::text").get()),
             self._extract_after_label(page_text, ["Venue", "Gallery"]),
+            fallback_venue_name,
         )
-        venue_address = self._first_non_empty(
+        venue_address = self._first_valid(
             self._clean(response.css("[itemprop='streetAddress']::text").get()),
             self._extract_after_label(page_text, ["Address"]),
             self._extract_address_like_line(page_text),
         )
 
-        city = self._first_non_empty(
+        city = self._first_valid(
             self._clean(response.css("[itemprop='addressLocality']::text").get()),
             self._extract_after_label(page_text, ["City"]),
+            fallback_city,
             self.city.replace("-", " ").title(),
         )
-        country = self._first_non_empty(
+        country = self._first_valid(
             self._clean(response.css("[itemprop='addressCountry']::text").get()),
             self._extract_after_label(page_text, ["Country"]),
             self.country.replace("-", " ").title(),
@@ -166,6 +195,13 @@ class ArtRabbitEventsSpider(scrapy.Spider):
         raw_payload = {
             "event_category_text": self._clean(response.css("[class*='category']::text").get()),
             "venue_block_text": venue_text,
+            "seo_title_fallback": {
+                "source": seo_title,
+                "event_title": fallback_event_title,
+                "event_type": fallback_event_type,
+                "venue_name": fallback_venue_name,
+                "city": fallback_city,
+            },
             "detail_links": [response.urljoin(h) for h in response.css("a::attr(href)").getall() if h],
         }
 
@@ -206,7 +242,7 @@ class ArtRabbitEventsSpider(scrapy.Spider):
             parsed = urlparse(absolute)
             if not parsed.netloc.endswith("artrabbit.com"):
                 continue
-            if "/events/" not in parsed.path.lower():
+            if not self._is_event_detail_url(parsed.geturl()):
                 continue
             links.append(parsed._replace(fragment="").geturl().rstrip("/"))
         return list(dict.fromkeys(links))
@@ -248,6 +284,7 @@ class ArtRabbitEventsSpider(scrapy.Spider):
         gallery_item["raw_payload"] = {
             "event_source_url": response.url,
             "venue_block_text": venue_text,
+            "seo_title_fallback": self._clean(response.css("title::text, meta[property='og:title']::attr(content)").get()),
         }
         gallery_item["crawl_timestamp"] = datetime.now(UTC).isoformat()
         return gallery_item
@@ -316,6 +353,20 @@ class ArtRabbitEventsSpider(scrapy.Spider):
                 return event_type
         return "event"
 
+    def _parse_seo_title(self, seo_title: str | None) -> tuple[str | None, str | None, str | None, str | None]:
+        clean_title = self._clean(seo_title)
+        if not clean_title:
+            return None, None, None, None
+        match = re.match(r"^(?P<title>.+?)\s*-\s*(?P<etype>.+?)\s+at\s+(?P<venue>.+?)\s+in\s+(?P<city>.+)$", clean_title)
+        if not match:
+            return None, None, None, None
+        return (
+            self._clean(match.group("title")),
+            self._clean(match.group("etype")),
+            self._clean(match.group("venue")),
+            self._clean(match.group("city")),
+        )
+
     def _extract_dates(self, response: scrapy.http.Response, page_text: str):
         text = " ".join(filter(None, [page_text, " ".join(response.css("time::text").getall())]))
 
@@ -379,6 +430,8 @@ class ArtRabbitEventsSpider(scrapy.Spider):
             clean_line = self._clean(line)
             if not clean_line:
                 continue
+            if self._is_invalid_text(clean_line):
+                continue
             if any(token in clean_line.lower() for token in ["street", "road", "rd", "ave", "avenue", "lane"]):
                 return clean_line
         return None
@@ -403,6 +456,33 @@ class ArtRabbitEventsSpider(scrapy.Spider):
             if cleaned:
                 return cleaned
         return None
+
+    def _first_valid(self, *values: str | None) -> str | None:
+        for value in values:
+            cleaned = self._clean(value)
+            if cleaned and not self._is_invalid_text(cleaned):
+                return cleaned
+        return None
+
+    def _is_invalid_text(self, value: str | None) -> bool:
+        cleaned = self._clean(value)
+        if not cleaned:
+            return True
+        lowered = cleaned.lower()
+        if any(bad in lowered for bad in self.INVALID_TEXT_VALUES):
+            return True
+        if lowered.startswith("breadcrumb"):
+            return True
+        return False
+
+    def _is_event_detail_url(self, url: str) -> bool:
+        parsed = urlparse(url)
+        path = parsed.path.lower().rstrip("/")
+        if not path:
+            return False
+        if any(path == prefix.rstrip("/") or path.startswith(prefix) for prefix in self.EXCLUDED_PATH_PREFIXES):
+            return False
+        return bool(self.EVENT_PATH_PATTERN.match(path or "/"))
 
     def _slugify(self, value: str) -> str:
         lowered = re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
