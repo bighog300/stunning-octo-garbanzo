@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import os
+import uuid
 
+import psycopg2
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
 
-from artrabbit_daily_pipeline import (
-    SPIDER_NAME,
-    create_crawl_run,
-    validate_raw_ingestion,
-)
+
+SOURCE_DOMAIN = "artrabbit.com"
+SPIDER_NAME = "art_rabbit_events"
 
 
 CITY_CONFIGS = [
@@ -21,12 +22,75 @@ CITY_CONFIGS = [
     {"city": "glasgow", "country": "united-kingdom", "max_pages": 15, "max_records": 500},
 ]
 
+
 DEFAULT_ARGS = {
     "owner": "artio-data",
     "depends_on_past": False,
     "retries": 1,
     "retry_delay": timedelta(minutes=15),
 }
+
+
+def _conn():
+    return psycopg2.connect(
+        host=os.getenv("ARTIO_POSTGRES_HOST", "postgres"),
+        port=os.getenv("ARTIO_POSTGRES_PORT", "5432"),
+        dbname=os.getenv("ARTIO_POSTGRES_DB", "artio"),
+        user=os.getenv("ARTIO_POSTGRES_USER", "artio"),
+        password=os.getenv("ARTIO_POSTGRES_PASSWORD", "artio"),
+    )
+
+
+def create_crawl_run(**context):
+    crawl_run_id = str(uuid.uuid4())
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                '''
+                insert into raw.crawl_runs (id, source_name, spider_name, run_status, started_at, airflow_dag_id, airflow_task_id)
+                values (%s, %s, %s, 'started', now(), %s, %s)
+                ''',
+                (
+                    crawl_run_id,
+                    "ArtRabbit",
+                    SPIDER_NAME,
+                    context["dag"].dag_id,
+                    context["task"].task_id,
+                ),
+            )
+    return crawl_run_id
+
+
+def validate_raw_ingestion(**context):
+    crawl_run_id = context["ti"].xcom_pull(task_ids="create_crawl_run")
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                select count(*)
+                from raw.events
+                where source_domain = %s and (crawl_run_id = %s or %s is null)
+                """,
+                (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
+            )
+            event_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                select count(*)
+                from raw.galleries
+                where source_domain = %s
+                  and crawl_timestamp >= now() - interval '1 day'
+                """,
+                (SOURCE_DOMAIN,),
+            )
+            gallery_count = cur.fetchone()[0]
+
+    if event_count < 1:
+        raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} event row, found {event_count}")
+    if gallery_count < 1:
+        raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} gallery row, found {gallery_count}")
+
 
 # Create the crawl pool once in Airflow:
 # airflow pools set artrabbit_pool 1 "Rate-limited ArtRabbit crawl pool"
