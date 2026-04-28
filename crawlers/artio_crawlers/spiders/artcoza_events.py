@@ -7,7 +7,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import scrapy
 
-from artio_crawlers.items import EventArtistItem, EventImageItem, EventItem
+from artio_crawlers.items import EventArtistItem, EventImageItem, EventItem, GalleryItem
 from artio_crawlers.utils.hashing import content_hash
 
 
@@ -166,6 +166,10 @@ class ArtCoZaEventsSpider(scrapy.Spider):
             image_item["image_type"] = "primary"
             image_item["content_hash"] = content_hash(response.url, image_url, title)
             yield image_item
+
+        gallery_item = self._extract_gallery_item(response, title, description, artists)
+        if gallery_item is not None:
+            yield gallery_item
 
         self._records_emitted += 1
 
@@ -358,6 +362,84 @@ class ArtCoZaEventsSpider(scrapy.Spider):
             if city.lower() in text.lower() or (venue_address and city.lower() in venue_address.lower()):
                 return city
         return None
+
+    def _extract_gallery_item(
+        self,
+        response: scrapy.http.Response,
+        title: str | None,
+        description: str | None,
+        artists: list[dict[str, str | None]],
+    ) -> GalleryItem | None:
+        if "/galleries/" not in response.url.lower():
+            return None
+        gallery_name = self._clean_text(
+            self._extract_value_after_label(response, ["gallery", "venue", "name"]) or title
+        )
+        if not gallery_name:
+            return None
+
+        social_links: dict[str, str | None] = {"instagram": None, "facebook": None, "website": None}
+        email: str | None = None
+        phone: str | None = None
+        for href in response.css("a::attr(href)").getall():
+            absolute = response.urljoin(href)
+            lower = absolute.lower()
+            if lower.startswith("mailto:"):
+                email = email or absolute.split(":", 1)[1].strip()
+            elif lower.startswith("tel:"):
+                phone = phone or absolute.split(":", 1)[1].strip()
+            elif "instagram.com" in lower:
+                social_links["instagram"] = absolute
+            elif "facebook.com" in lower:
+                social_links["facebook"] = absolute
+            elif "art.co.za" not in lower and lower.startswith(("http://", "https://")):
+                social_links["website"] = social_links["website"] or absolute
+
+        detail_text = " ".join(self._text_blocks(response))
+        if not email:
+            email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", detail_text, flags=re.IGNORECASE)
+            email = email_match.group(0) if email_match else None
+        if not phone:
+            phone_match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", detail_text)
+            phone = phone_match.group(0) if phone_match else None
+
+        city = self._extract_city(response, None)
+        address = self._extract_value_after_label(response, ["address", "venue"])
+        slug = self._gallery_slug(response.url)
+        item = GalleryItem()
+        item["crawl_run_id"] = self.crawl_run_id
+        item["source_domain"] = "art.co.za"
+        item["source_url"] = response.url
+        item["source_record_id"] = f"art.co.za:gallery:{slug}"
+        item["gallery_name"] = gallery_name
+        item["address"] = self._clean_text(address)
+        item["city"] = city
+        item["region"] = None
+        item["country"] = "South Africa"
+        item["phone"] = self._clean_text(phone)
+        item["email"] = self._clean_text(email).lower() if email else None
+        item["website_url"] = social_links["website"]
+        item["instagram_url"] = social_links["instagram"]
+        item["facebook_url"] = social_links["facebook"]
+        item["contact_person"] = None
+        item["description"] = description
+        item["raw_payload"] = {
+            "represented_artists": artists,
+            "detail_links": [response.urljoin(h) for h in response.css("a::attr(href)").getall() if h],
+        }
+        item["crawl_timestamp"] = datetime.now(UTC).isoformat()
+        return item
+
+    @staticmethod
+    def _gallery_slug(url: str) -> str:
+        parsed = urlparse(url)
+        query = parse_qs(parsed.query)
+        if "nom" in query and query["nom"]:
+            value = query["nom"][0].strip().lower()
+            return re.sub(r"[^a-z0-9]+", "-", value).strip("-") or "unknown"
+        tail = parsed.path.rstrip("/").split("/")[-1] or "unknown"
+        tail = tail.split(".")[0]
+        return re.sub(r"[^a-z0-9]+", "-", tail.lower()).strip("-") or "unknown"
 
     @classmethod
     def _classify_event_type(cls, url: str, title: str | None, description: str | None) -> str:

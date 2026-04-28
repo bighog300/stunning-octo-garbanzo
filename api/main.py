@@ -75,6 +75,11 @@ class GalleryModerationPayload(BaseModel):
     canonical_address: str | None = None
     canonical_city: str | None = None
     canonical_country: str | None = None
+    canonical_phone: str | None = None
+    canonical_email: str | None = None
+    canonical_website_url: str | None = None
+    canonical_instagram_url: str | None = None
+    canonical_facebook_url: str | None = None
     moderation_reason: str | None = None
     moderator_notes: str | None = None
 
@@ -541,7 +546,10 @@ def _enrich_gallery_record(gallery: dict[str, Any]) -> dict[str, Any]:
     has_address = bool((gallery.get("gallery_address") or "").strip())
     has_city = bool((gallery.get("city") or "").strip())
     has_country = bool((gallery.get("country") or "").strip())
-    has_website = bool((gallery.get("source_domain") or "").strip() or (gallery.get("source_url") or "").strip())
+    has_website = bool((gallery.get("website_url") or "").strip() or (gallery.get("source_url") or "").strip())
+    has_phone = bool((gallery.get("phone") or "").strip())
+    has_email = bool((gallery.get("email") or "").strip())
+    has_social = bool((gallery.get("instagram_url") or "").strip() or (gallery.get("facebook_url") or "").strip())
     has_linked_events = len(linked_events) > 0
     quality_flags = []
     if not has_address:
@@ -552,6 +560,12 @@ def _enrich_gallery_record(gallery: dict[str, Any]) -> dict[str, Any]:
         quality_flags.append("missing_country")
     if not has_website:
         quality_flags.append("missing_website")
+    if not has_phone:
+        quality_flags.append("missing_phone")
+    if not has_email:
+        quality_flags.append("missing_email")
+    if not has_social:
+        quality_flags.append("missing_social")
     if not has_linked_events:
         quality_flags.append("missing_linked_events")
     quality_score = (
@@ -560,6 +574,9 @@ def _enrich_gallery_record(gallery: dict[str, Any]) -> dict[str, Any]:
         + int(has_city)
         + int(has_country)
         + int(has_website)
+        + int(has_phone)
+        + int(has_email)
+        + int(has_social)
         + int(has_linked_events)
     )
     return {
@@ -570,13 +587,16 @@ def _enrich_gallery_record(gallery: dict[str, Any]) -> dict[str, Any]:
         "missing_city": not has_city,
         "missing_country": not has_country,
         "missing_website": not has_website,
+        "missing_phone": not has_phone,
+        "missing_email": not has_email,
+        "missing_social": not has_social,
         "missing_linked_events": not has_linked_events,
     }
 
 
 def _merged_gallery_moderation_values(
     current: dict[str, Any], payload: GalleryModerationPayload
-) -> tuple[bool, bool, str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
+) -> tuple[bool, bool, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None, str | None]:
     next_hidden = payload.is_hidden if payload.is_hidden is not None else current.get("is_hidden", False)
     next_approved = payload.is_approved if payload.is_approved is not None else current.get("is_approved", False)
     next_name = (
@@ -596,6 +616,23 @@ def _merged_gallery_moderation_values(
     next_country = (
         payload.canonical_country if payload.canonical_country is not None else current.get("canonical_country")
     )
+    next_phone = payload.canonical_phone if payload.canonical_phone is not None else current.get("canonical_phone")
+    next_email = payload.canonical_email if payload.canonical_email is not None else current.get("canonical_email")
+    next_website_url = (
+        payload.canonical_website_url
+        if payload.canonical_website_url is not None
+        else current.get("canonical_website_url")
+    )
+    next_instagram_url = (
+        payload.canonical_instagram_url
+        if payload.canonical_instagram_url is not None
+        else current.get("canonical_instagram_url")
+    )
+    next_facebook_url = (
+        payload.canonical_facebook_url
+        if payload.canonical_facebook_url is not None
+        else current.get("canonical_facebook_url")
+    )
     next_reason = (
         payload.moderation_reason
         if payload.moderation_reason is not None
@@ -610,6 +647,11 @@ def _merged_gallery_moderation_values(
         next_address,
         next_city,
         next_country,
+        next_phone,
+        next_email,
+        next_website_url,
+        next_instagram_url,
+        next_facebook_url,
         next_reason,
         next_notes,
     )
@@ -622,7 +664,9 @@ def _upsert_gallery_moderation(cur: psycopg.Cursor, gallery_id: str, payload: Ga
     cur.execute(
         """
         SELECT is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
-               canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes
+               canonical_address, canonical_city, canonical_country, canonical_phone, canonical_email,
+               canonical_website_url, canonical_instagram_url, canonical_facebook_url,
+               moderation_reason, moderator_notes
         FROM app.gallery_moderation_overrides
         WHERE gallery_id = %s::uuid
         LIMIT 1
@@ -635,11 +679,14 @@ def _upsert_gallery_moderation(cur: psycopg.Cursor, gallery_id: str, payload: Ga
         """
         INSERT INTO app.gallery_moderation_overrides (
             gallery_id, is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
-            canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes, updated_at
+            canonical_address, canonical_city, canonical_country, canonical_phone, canonical_email,
+            canonical_website_url, canonical_instagram_url, canonical_facebook_url,
+            moderation_reason, moderator_notes, updated_at
         )
         VALUES (
             %s::uuid, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''),
-            NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), now()
+            NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''),
+            NULLIF(%s, ''), NULLIF(%s, ''), now()
         )
         ON CONFLICT (gallery_id)
         DO UPDATE SET
@@ -650,11 +697,18 @@ def _upsert_gallery_moderation(cur: psycopg.Cursor, gallery_id: str, payload: Ga
             canonical_address = EXCLUDED.canonical_address,
             canonical_city = EXCLUDED.canonical_city,
             canonical_country = EXCLUDED.canonical_country,
+            canonical_phone = EXCLUDED.canonical_phone,
+            canonical_email = EXCLUDED.canonical_email,
+            canonical_website_url = EXCLUDED.canonical_website_url,
+            canonical_instagram_url = EXCLUDED.canonical_instagram_url,
+            canonical_facebook_url = EXCLUDED.canonical_facebook_url,
             moderation_reason = EXCLUDED.moderation_reason,
             moderator_notes = EXCLUDED.moderator_notes,
             updated_at = now()
         RETURNING gallery_id, is_hidden, is_approved, canonical_gallery_name, canonical_gallery_type,
-                  canonical_address, canonical_city, canonical_country, moderation_reason, moderator_notes, updated_at
+                  canonical_address, canonical_city, canonical_country, canonical_phone, canonical_email,
+                  canonical_website_url, canonical_instagram_url, canonical_facebook_url,
+                  moderation_reason, moderator_notes, updated_at
         """,
         (gallery_id, *merged),
     )
@@ -1600,6 +1654,12 @@ def list_admin_galleries(
     missing_address: bool = False,
     missing_city: bool = False,
     missing_country: bool = False,
+    missing_email: bool = False,
+    missing_phone: bool = False,
+    missing_website: bool = False,
+    missing_social: bool = False,
+    possible_duplicate: bool = False,
+    gallery_record_type: str | None = None,
     include_hidden: bool = True,
 ) -> list[dict[str, Any]]:
     safe_limit = _safe_limit(limit)
@@ -1631,6 +1691,19 @@ def list_admin_galleries(
         where_clauses.append("missing_city = true")
     if missing_country:
         where_clauses.append("missing_country = true")
+    if missing_email:
+        where_clauses.append("missing_email = true")
+    if missing_phone:
+        where_clauses.append("missing_phone = true")
+    if missing_website:
+        where_clauses.append("missing_website = true")
+    if missing_social:
+        where_clauses.append("missing_social = true")
+    if possible_duplicate:
+        where_clauses.append("gallery_name ILIKE '%gallery%'")
+    if gallery_record_type in {"scraped", "inferred_from_event"}:
+        where_clauses.append("gallery_record_type = %s")
+        params.append(gallery_record_type)
     if search:
         where_clauses.append("(gallery_name ILIKE %s OR canonical_gallery_name ILIKE %s OR source_url ILIKE %s)")
         params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
@@ -1641,11 +1714,13 @@ def list_admin_galleries(
             cur.execute(
                 f"""
                 SELECT gallery_id, gallery_name, normalized_gallery_name, gallery_address, city, country,
-                       source_domain, source_url, linked_events, linked_artists, is_hidden, is_approved,
+                       source_domain, source_url, gallery_record_type, phone, email, website_url, instagram_url, facebook_url,
+                       linked_events, linked_artists, linked_artworks, is_hidden, is_approved,
                        canonical_gallery_name, canonical_gallery_type, canonical_address, canonical_city,
-                       canonical_country, moderation_reason, moderator_notes, updated_at,
+                       canonical_country, canonical_phone, canonical_email, canonical_website_url,
+                       canonical_instagram_url, canonical_facebook_url, moderation_reason, moderator_notes, updated_at,
                        quality_score, quality_flags, missing_address, missing_city, missing_country,
-                       missing_website, missing_linked_events, crawl_timestamp
+                       missing_website, missing_email, missing_phone, missing_social, missing_linked_events, crawl_timestamp
                 FROM app.gallery_records
                 {where_sql}
                 ORDER BY crawl_timestamp DESC NULLS LAST
@@ -1664,11 +1739,13 @@ def get_admin_gallery(gallery_id: str) -> dict[str, Any]:
             cur.execute(
                 """
                 SELECT gallery_id, gallery_name, normalized_gallery_name, gallery_address, city, country,
-                       source_domain, source_url, linked_events, linked_artists, is_hidden, is_approved,
+                       source_domain, source_url, gallery_record_type, phone, email, website_url, instagram_url, facebook_url,
+                       linked_events, linked_artists, linked_artworks, is_hidden, is_approved,
                        canonical_gallery_name, canonical_gallery_type, canonical_address, canonical_city,
-                       canonical_country, moderation_reason, moderator_notes, updated_at,
+                       canonical_country, canonical_phone, canonical_email, canonical_website_url,
+                       canonical_instagram_url, canonical_facebook_url, moderation_reason, moderator_notes, updated_at,
                        quality_score, quality_flags, missing_address, missing_city, missing_country,
-                       missing_website, missing_linked_events, raw_payload, crawl_timestamp
+                       missing_website, missing_email, missing_phone, missing_social, missing_linked_events, raw_payload, crawl_timestamp
                 FROM app.gallery_records
                 WHERE gallery_id = %s::uuid
                 LIMIT 1
@@ -1745,6 +1822,9 @@ def get_admin_moderation_metrics() -> dict[str, Any]:
                     COUNT(*) FILTER (WHERE missing_address = true)::int AS missing_address,
                     COUNT(*) FILTER (WHERE missing_city = true)::int AS missing_city,
                     COUNT(*) FILTER (WHERE missing_country = true)::int AS missing_country,
+                    COUNT(*) FILTER (WHERE missing_email = true)::int AS missing_email,
+                    COUNT(*) FILTER (WHERE missing_phone = true)::int AS missing_phone,
+                    COUNT(*) FILTER (WHERE missing_social = true)::int AS missing_social,
                     COUNT(*) FILTER (WHERE COALESCE(quality_score, 0) <= 3)::int AS low_quality,
                     COUNT(*) FILTER (WHERE crawl_timestamp >= NOW() - INTERVAL '7 days')::int AS recently_crawled
                 FROM app.gallery_records

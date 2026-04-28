@@ -1348,8 +1348,11 @@ function AdminGalleriesPage() {
     search: searchParams.get('search') || '',
     source_domain: searchParams.get('source_domain') || '',
     missing_address: searchParams.get('missing_address') === 'true',
-    missing_city: searchParams.get('missing_city') === 'true',
-    missing_country: searchParams.get('missing_country') === 'true',
+    missing_email: searchParams.get('missing_email') === 'true',
+    missing_phone: searchParams.get('missing_phone') === 'true',
+    missing_website: searchParams.get('missing_website') === 'true',
+    missing_social: searchParams.get('missing_social') === 'true',
+    gallery_record_type: searchParams.get('gallery_record_type') || '',
     include_hidden: searchParams.get('include_hidden') !== 'false',
     limit: 100,
     offset: 0,
@@ -1402,8 +1405,10 @@ function AdminGalleriesPage() {
         <input type="search" placeholder="Search galleries" value={filters.search} onChange={(e) => updateFilter('search', e.target.value)} />
         <input type="text" placeholder="Source domain" value={filters.source_domain} onChange={(e) => updateFilter('source_domain', e.target.value)} />
         <label><input type="checkbox" checked={filters.missing_address} onChange={(e) => updateFilter('missing_address', e.target.checked)} /> Missing address</label>
-        <label><input type="checkbox" checked={filters.missing_city} onChange={(e) => updateFilter('missing_city', e.target.checked)} /> Missing city</label>
-        <label><input type="checkbox" checked={filters.missing_country} onChange={(e) => updateFilter('missing_country', e.target.checked)} /> Missing country</label>
+        <label><input type="checkbox" checked={filters.missing_email} onChange={(e) => updateFilter('missing_email', e.target.checked)} /> Missing email</label>
+        <label><input type="checkbox" checked={filters.missing_phone} onChange={(e) => updateFilter('missing_phone', e.target.checked)} /> Missing phone</label>
+        <label><input type="checkbox" checked={filters.missing_website} onChange={(e) => updateFilter('missing_website', e.target.checked)} /> Missing website</label>
+        <label><input type="checkbox" checked={filters.missing_social} onChange={(e) => updateFilter('missing_social', e.target.checked)} /> Missing social</label>
       </div>
       {loading && <p>Loading galleries…</p>}
       {error && <p className="error-text">{error}</p>}
@@ -1416,6 +1421,11 @@ function AdminGalleriesPage() {
               <th>City</th>
               <th>Country</th>
               <th>Source</th>
+              <th>Type</th>
+              <th>Phone</th>
+              <th>Email</th>
+              <th>Website</th>
+              <th>Social</th>
               <th>Quality</th>
               <th>Flags</th>
               <th>Moderation</th>
@@ -1423,7 +1433,7 @@ function AdminGalleriesPage() {
           </thead>
           <tbody>
             {selected.size > 0 && (
-              <tr><td colSpan={8}><div className="action-row"><strong>{selected.size} selected</strong><button disabled={saving} onClick={() => runBulk({ is_approved: true, is_hidden: false })}>Approve</button><button disabled={saving} onClick={() => runBulk({ is_hidden: true })}>Hide</button><button disabled={saving} onClick={() => runBulk({ is_hidden: false })}>Unhide</button></div></td></tr>
+              <tr><td colSpan={13}><div className="action-row"><strong>{selected.size} selected</strong><button disabled={saving} onClick={() => runBulk({ is_approved: true, is_hidden: false })}>Approve</button><button disabled={saving} onClick={() => runBulk({ is_hidden: true })}>Hide</button><button disabled={saving} onClick={() => runBulk({ is_hidden: false })}>Unhide</button></div></td></tr>
             )}
             {rows.map((gallery) => (
               <tr key={gallery.gallery_id}>
@@ -1432,7 +1442,12 @@ function AdminGalleriesPage() {
                 <td>{gallery.city || '—'}</td>
                 <td>{gallery.country || '—'}</td>
                 <td>{gallery.source_domain || '—'}</td>
-                <td><span className="quality-badge">{gallery.quality_score}/6</span></td>
+                <td><span className="quality-badge">{gallery.gallery_record_type || 'inferred_from_event'}</span></td>
+                <td>{gallery.phone || '—'}</td>
+                <td>{gallery.email || '—'}</td>
+                <td>{gallery.website_url ? <a href={gallery.website_url} target="_blank" rel="noreferrer">site</a> : '—'}</td>
+                <td>{gallery.instagram_url || gallery.facebook_url ? <>{gallery.instagram_url && <a href={gallery.instagram_url} target="_blank" rel="noreferrer">instagram</a>} {gallery.facebook_url && <a href={gallery.facebook_url} target="_blank" rel="noreferrer">facebook</a>}</> : '—'}</td>
+                <td><span className="quality-badge">{gallery.quality_score}/9</span></td>
                 <td>{gallery.quality_flags?.join(', ') || 'ok'}</td>
                 <td>
                   <label><input type="checkbox" checked={Boolean(gallery.is_approved)} onChange={(e) => patchGalleryModeration(gallery.gallery_id, { is_approved: e.target.checked }).then(() => setRows((cur) => cur.map((row) => row.gallery_id === gallery.gallery_id ? { ...row, is_approved: e.target.checked } : row)))} />Approve</label>
@@ -1477,10 +1492,16 @@ function AdminGalleryDetailPage() {
       <h2>{gallery.canonical_gallery_name || gallery.gallery_name}</h2>
       <p><strong>Address:</strong> {gallery.canonical_address || gallery.gallery_address || 'Missing address'}</p>
       <p><strong>City/Country:</strong> {[gallery.canonical_city || gallery.city, gallery.canonical_country || gallery.country].filter(Boolean).join(', ') || '—'}</p>
+      <p><strong>Type:</strong> {gallery.gallery_record_type || 'inferred_from_event'}</p>
+      <p><strong>Contact:</strong> {(gallery.canonical_phone || gallery.phone) || '—'} · {(gallery.canonical_email || gallery.email) || '—'}</p>
+      <p><strong>Website:</strong> {(gallery.canonical_website_url || gallery.website_url) ? <a href={gallery.canonical_website_url || gallery.website_url} target="_blank" rel="noreferrer">{gallery.canonical_website_url || gallery.website_url}</a> : '—'}</p>
       <div className="action-row">
         <button onClick={() => update({ is_approved: !gallery.is_approved })}>{gallery.is_approved ? 'Unapprove' : 'Approve'}</button>
         <button onClick={() => update({ is_hidden: !gallery.is_hidden })}>{gallery.is_hidden ? 'Unhide' : 'Hide'}</button>
         <button onClick={() => { const val = window.prompt('Canonical gallery name', gallery.canonical_gallery_name || gallery.gallery_name || ''); if (val !== null) update({ canonical_gallery_name: val }) }}>Set canonical name</button>
+        <button onClick={() => { const val = window.prompt('Canonical email', gallery.canonical_email || gallery.email || ''); if (val !== null) update({ canonical_email: val }) }}>Set canonical email</button>
+        <button onClick={() => { const val = window.prompt('Canonical phone', gallery.canonical_phone || gallery.phone || ''); if (val !== null) update({ canonical_phone: val }) }}>Set canonical phone</button>
+        <button onClick={() => { const val = window.prompt('Canonical website', gallery.canonical_website_url || gallery.website_url || ''); if (val !== null) update({ canonical_website_url: val }) }}>Set canonical website</button>
       </div>
       <h3>Linked events</h3>
       <ul>
@@ -1490,6 +1511,10 @@ function AdminGalleryDetailPage() {
           </li>
         ))}
       </ul>
+      <h3>Linked artists</h3>
+      <ul>{(gallery.linked_artists || []).map((artist, idx) => <li key={`${artist.artist_name || 'artist'}-${idx}`}>{artist.artist_name || 'Unknown artist'}</li>)}</ul>
+      <h3>Linked artworks</h3>
+      <ul>{(gallery.linked_artworks || []).map((artwork, idx) => <li key={`${artwork.artwork_id || 'artwork'}-${idx}`}>{artwork.artwork_title || artwork.artwork_id}</li>)}</ul>
       {status && <p>{status}</p>}
     </section>
   )
