@@ -7,7 +7,7 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.operators.python import PythonOperator
 
-from airflow.dags.artrabbit_daily_pipeline import (
+from artrabbit_daily_pipeline import (
     SPIDER_NAME,
     create_crawl_run,
     validate_raw_ingestion,
