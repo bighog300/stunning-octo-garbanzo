@@ -4,6 +4,7 @@ from artio_crawlers.db import (
     get_connection,
     insert_event_artist,
     insert_event_image,
+    upsert_artist,
     upsert_gallery,
     upsert_artwork,
     upsert_event,
@@ -17,7 +18,9 @@ class PostgresArtworkPipeline:
         self._event_children_reset: set[str] = set()
 
     def close_spider(self, spider):
-        self.conn.close()
+        conn = getattr(self, "conn", None)
+        if conn is not None:
+            conn.close()
 
     def process_item(self, item, spider):
         data = dict(ItemAdapter(item))
@@ -39,7 +42,13 @@ class PostgresArtworkPipeline:
             self._event_id_map[event_key] = event_id
             if event_id not in self._event_children_reset:
                 delete_event_children(self.conn, event_id)
-                self._event_children_reset.add(event_id)
+            self._event_children_reset.add(event_id)
+            return item
+
+        if "biography" in data:
+            if not data.get("source_url") or not data.get("source_domain"):
+                raise ValueError("source_url and source_domain are required for ArtistItem")
+            upsert_artist(self.conn, data)
             return item
 
         if "artist_name_normalized" in data:
