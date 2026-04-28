@@ -116,6 +116,17 @@ function patchEventModeration(eventId, payload) {
   })
 }
 
+function patchBulkEventModeration(payload) {
+  return api('/api/admin/events/bulk-moderation', {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+function eventModerationStatusLabel(event) {
+  return event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'
+}
+
 function useFetch(path) {
   const [data, setData] = React.useState([])
   const [loading, setLoading] = React.useState(true)
@@ -744,6 +755,10 @@ function AdminEventsPage() {
   const [events, setEvents] = React.useState([])
   const [loading, setLoading] = React.useState(true)
   const [error, setError] = React.useState('')
+  const [saving, setSaving] = React.useState(false)
+  const [saveError, setSaveError] = React.useState('')
+  const [selectedEventIds, setSelectedEventIds] = React.useState(new Set())
+  const [bulkEventType, setBulkEventType] = React.useState('')
 
   const filters = React.useMemo(() => ({
     moderation_status: searchParams.get('moderation_status') || 'all',
@@ -762,17 +777,91 @@ function AdminEventsPage() {
     setLoading(true)
     setError('')
     getAdminEvents(filters)
-      .then((json) => mounted && setEvents(Array.isArray(json) ? json : []))
+      .then((json) => {
+        if (!mounted) return
+        setEvents(Array.isArray(json) ? json : [])
+        setSelectedEventIds(new Set())
+      })
       .catch((err) => mounted && setError(err.message))
       .finally(() => mounted && setLoading(false))
     return () => { mounted = false }
   }, [filters])
+
+  const availableEventTypes = React.useMemo(() => {
+    const fromData = events
+      .map((event) => event.event_type || event.canonical_event_type || event.original_event_type)
+      .filter(Boolean)
+    return Array.from(new Set(['exhibition', 'fair', 'talk', 'auction', ...fromData]))
+  }, [events])
+
+  const selectedCount = selectedEventIds.size
+  const allVisibleSelected = events.length > 0 && events.every((event) => selectedEventIds.has(event.event_id))
+
+  function updateEventRow(eventId, updates) {
+    setEvents((current) => current.map((event) => (event.event_id === eventId ? { ...event, ...updates } : event)))
+  }
 
   function updateFilter(key, value) {
     const next = new URLSearchParams(searchParams)
     if (value === '' || value === null) next.delete(key)
     else next.set(key, String(value))
     setSearchParams(next)
+  }
+
+  function toggleSelected(eventId, checked) {
+    setSelectedEventIds((current) => {
+      const next = new Set(current)
+      if (checked) next.add(eventId)
+      else next.delete(eventId)
+      return next
+    })
+  }
+
+  function toggleSelectAllVisible(checked) {
+    if (checked) {
+      setSelectedEventIds(new Set(events.map((event) => event.event_id)))
+      return
+    }
+    setSelectedEventIds(new Set())
+  }
+
+  async function saveSingleEvent(eventId, updates) {
+    try {
+      setSaving(true)
+      setSaveError('')
+      const result = await patchEventModeration(eventId, updates)
+      updateEventRow(eventId, result.event_moderation || updates)
+    } catch (err) {
+      setSaveError(`Failed to update event ${eventId}: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function runBulkUpdate(updates) {
+    if (selectedEventIds.size === 0) return
+    const eventIds = Array.from(selectedEventIds)
+    setSaving(true)
+    setSaveError('')
+    try {
+      try {
+        const result = await patchBulkEventModeration({ event_ids: eventIds, updates })
+        if (result.failed?.length) {
+          setSaveError(`Updated ${result.updated} events, ${result.failed.length} failed.`)
+        }
+      } catch (bulkErr) {
+        await Promise.all(eventIds.map((eventId) => patchEventModeration(eventId, updates)))
+      }
+      setEvents((current) => current.map((event) => (
+        selectedEventIds.has(event.event_id)
+          ? { ...event, ...updates, event_type: updates.event_type ?? event.event_type }
+          : event
+      )))
+    } catch (err) {
+      setSaveError(`Bulk update failed: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
   }
 
   return (
@@ -809,25 +898,105 @@ function AdminEventsPage() {
       </div>
       {loading && <p>Loading events…</p>}
       {error && <p className="error-text">Failed to load events: {error}</p>}
+      {saveError && <p className="error-text">{saveError}</p>}
       {!loading && !error && (
         <table>
           <thead>
             <tr>
-              <th>Title</th><th>Type</th><th>Artists</th><th>Venue</th><th>City</th><th>Dates</th><th>Source</th><th>Crawl</th><th>Status</th>
+              <th>
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={(e) => toggleSelectAllVisible(e.target.checked)}
+                  aria-label="Select all visible events"
+                />
+              </th>
+              <th>Title</th><th>Type</th><th>Artists</th><th>Venue</th><th>City</th><th>Dates</th><th>Source</th><th>Crawl</th><th>Status</th><th>Inline moderation</th>
             </tr>
           </thead>
           <tbody>
+            {selectedCount > 0 && (
+              <tr>
+                <td colSpan={11}>
+                  <div className="action-row">
+                    <strong>{selectedCount} selected</strong>
+                    <button disabled={saving} onClick={() => runBulkUpdate({ is_approved: true })}>Approve selected</button>
+                    <button disabled={saving} onClick={() => runBulkUpdate({ is_hidden: true })}>Hide selected</button>
+                    <button disabled={saving} onClick={() => runBulkUpdate({ is_hidden: false })}>Unhide selected</button>
+                    <button disabled={saving} onClick={() => runBulkUpdate({ is_approved: false })}>Mark unapproved</button>
+                    <select value={bulkEventType} onChange={(e) => setBulkEventType(e.target.value)} disabled={saving}>
+                      <option value="">Set event type…</option>
+                      {availableEventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                    <button disabled={saving || !bulkEventType} onClick={() => runBulkUpdate({ event_type: bulkEventType })}>
+                      Apply type
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            )}
             {events.map((event) => (
               <tr key={event.event_id}>
+                <td>
+                  <input
+                    type="checkbox"
+                    checked={selectedEventIds.has(event.event_id)}
+                    onChange={(e) => toggleSelected(event.event_id, e.target.checked)}
+                    aria-label={`Select ${event.event_title || event.original_event_title || 'event'}`}
+                  />
+                </td>
                 <td><Link to={`/admin/events/${event.event_id}`}>{event.event_title || event.original_event_title || 'Untitled event'}</Link></td>
-                <td>{event.event_type || 'Unknown'}</td>
+                <td>{event.event_type || event.canonical_event_type || 'Unknown'}</td>
                 <td>{Array.isArray(event.linked_artists) && event.linked_artists.length > 0 ? event.linked_artists.join(', ') : '—'}</td>
                 <td>{event.venue_name || 'Missing venue'}</td>
                 <td>{event.city || '—'}</td>
                 <td>{event.start_date || 'Missing'}{event.end_date ? ` → ${event.end_date}` : ''}</td>
                 <td>{event.source_domain || event.source_name}</td>
                 <td>{event.crawl_timestamp || '—'}</td>
-                <td>{event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'}</td>
+                <td>{eventModerationStatusLabel(event)}</td>
+                <td>
+                  <div className="inline-controls">
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(event.is_approved)}
+                        disabled={saving}
+                        onChange={(e) => saveSingleEvent(event.event_id, { is_approved: e.target.checked })}
+                      />
+                      Approve
+                    </label>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={Boolean(event.is_hidden)}
+                        disabled={saving}
+                        onChange={(e) => saveSingleEvent(event.event_id, { is_hidden: e.target.checked })}
+                      />
+                      Hide
+                    </label>
+                    <select
+                      value={event.event_type || ''}
+                      disabled={saving}
+                      onChange={(e) => saveSingleEvent(event.event_id, { event_type: e.target.value })}
+                    >
+                      <option value="">Event type…</option>
+                      {availableEventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                    <div className="inline-title-edit">
+                      <input
+                        type="text"
+                        defaultValue={event.canonical_event_title || event.event_title || ''}
+                        disabled={saving}
+                        placeholder="Canonical title"
+                        onBlur={(e) => {
+                          if ((event.canonical_event_title || event.event_title || '') !== e.target.value) {
+                            saveSingleEvent(event.event_id, { canonical_event_title: e.target.value })
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

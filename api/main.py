@@ -60,6 +60,11 @@ class EventModerationPayload(BaseModel):
     moderator_notes: str | None = None
 
 
+class BulkEventModerationPayload(BaseModel):
+    event_ids: list[str] = Field(min_length=1)
+    updates: EventModerationPayload
+
+
 app = FastAPI(title="Artio API", version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -188,6 +193,92 @@ def _queue_reason_sql(queue_name: str) -> str:
 
 def _safe_limit(limit: int) -> int:
     return max(1, min(limit, 500))
+
+
+def _merged_event_moderation_values(
+    current: dict[str, Any], payload: EventModerationPayload
+) -> tuple[bool, bool, str | None, str | None, str | None, str | None]:
+    next_hidden = payload.is_hidden if payload.is_hidden is not None else current.get("is_hidden", False)
+    next_approved = (
+        payload.is_approved if payload.is_approved is not None else current.get("is_approved", False)
+    )
+    next_title = (
+        payload.canonical_event_title
+        if payload.canonical_event_title is not None
+        else current.get("canonical_event_title")
+    )
+    next_type = payload.event_type if payload.event_type is not None else current.get("event_type")
+    next_reason = (
+        payload.moderation_reason
+        if payload.moderation_reason is not None
+        else current.get("moderation_reason")
+    )
+    next_notes = (
+        payload.moderator_notes if payload.moderator_notes is not None else current.get("moderator_notes")
+    )
+    return next_hidden, next_approved, next_title, next_type, next_reason, next_notes
+
+
+def _upsert_event_moderation(
+    cur: psycopg.Cursor, event_id: str, payload: EventModerationPayload
+) -> dict[str, Any]:
+    cur.execute(
+        "SELECT 1 FROM app.event_records WHERE event_id = %s::uuid LIMIT 1",
+        (event_id,),
+    )
+    exists = cur.fetchone()
+    if not exists:
+        raise HTTPException(status_code=404, detail=f"Event not found: {event_id}")
+
+    cur.execute(
+        """
+        SELECT is_hidden, is_approved, canonical_event_title, event_type,
+               moderation_reason, moderator_notes
+        FROM app.event_moderation_overrides
+        WHERE event_id = %s::uuid
+        LIMIT 1
+        """,
+        (event_id,),
+    )
+    current = cur.fetchone() or {}
+    next_hidden, next_approved, next_title, next_type, next_reason, next_notes = (
+        _merged_event_moderation_values(current, payload)
+    )
+
+    cur.execute(
+        """
+        INSERT INTO app.event_moderation_overrides (
+            event_id, is_hidden, is_approved, canonical_event_title, event_type,
+            moderation_reason, moderator_notes, updated_at
+        )
+        VALUES (
+            %s::uuid, %s, %s, NULLIF(%s, ''),
+            NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), now()
+        )
+        ON CONFLICT (event_id)
+        DO UPDATE SET
+            is_hidden = EXCLUDED.is_hidden,
+            is_approved = EXCLUDED.is_approved,
+            canonical_event_title = EXCLUDED.canonical_event_title,
+            event_type = EXCLUDED.event_type,
+            moderation_reason = EXCLUDED.moderation_reason,
+            moderator_notes = EXCLUDED.moderator_notes,
+            updated_at = now()
+        RETURNING event_id, is_hidden, is_approved, canonical_event_title, event_type,
+                  moderation_reason, moderator_notes, updated_at
+        """,
+        (
+            event_id,
+            next_hidden,
+            next_approved,
+            next_title,
+            next_type,
+            next_reason,
+            next_notes,
+        ),
+    )
+    row = cur.fetchone()
+    return _serialize_row(row)
 
 
 def _queue_status_filter(status: str) -> str:
@@ -795,86 +886,28 @@ def get_admin_event(event_id: str) -> dict[str, Any]:
 def patch_admin_event_moderation(event_id: str, payload: EventModerationPayload) -> dict[str, Any]:
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "SELECT 1 FROM app.event_records WHERE event_id = %s::uuid LIMIT 1",
-                (event_id,),
-            )
-            exists = cur.fetchone()
-            if not exists:
-                raise HTTPException(status_code=404, detail="Event not found")
-
-            cur.execute(
-                """
-                SELECT is_hidden, is_approved, canonical_event_title, event_type,
-                       moderation_reason, moderator_notes
-                FROM app.event_moderation_overrides
-                WHERE event_id = %s::uuid
-                LIMIT 1
-                """,
-                (event_id,),
-            )
-            current = cur.fetchone() or {}
-
-            next_hidden = (
-                payload.is_hidden if payload.is_hidden is not None else current.get("is_hidden", False)
-            )
-            next_approved = (
-                payload.is_approved
-                if payload.is_approved is not None
-                else current.get("is_approved", False)
-            )
-            next_title = (
-                payload.canonical_event_title
-                if payload.canonical_event_title is not None
-                else current.get("canonical_event_title")
-            )
-            next_type = payload.event_type if payload.event_type is not None else current.get("event_type")
-            next_reason = (
-                payload.moderation_reason
-                if payload.moderation_reason is not None
-                else current.get("moderation_reason")
-            )
-            next_notes = (
-                payload.moderator_notes
-                if payload.moderator_notes is not None
-                else current.get("moderator_notes")
-            )
-
-            cur.execute(
-                """
-                INSERT INTO app.event_moderation_overrides (
-                    event_id, is_hidden, is_approved, canonical_event_title, event_type,
-                    moderation_reason, moderator_notes, updated_at
-                )
-                VALUES (
-                    %s::uuid, %s, %s, NULLIF(%s, ''),
-                    NULLIF(%s, ''), NULLIF(%s, ''), NULLIF(%s, ''), now()
-                )
-                ON CONFLICT (event_id)
-                DO UPDATE SET
-                    is_hidden = EXCLUDED.is_hidden,
-                    is_approved = EXCLUDED.is_approved,
-                    canonical_event_title = EXCLUDED.canonical_event_title,
-                    event_type = EXCLUDED.event_type,
-                    moderation_reason = EXCLUDED.moderation_reason,
-                    moderator_notes = EXCLUDED.moderator_notes,
-                    updated_at = now()
-                RETURNING event_id, is_hidden, is_approved, canonical_event_title, event_type,
-                          moderation_reason, moderator_notes, updated_at
-                """,
-                (
-                    event_id,
-                    next_hidden,
-                    next_approved,
-                    next_title,
-                    next_type,
-                    next_reason,
-                    next_notes,
-                ),
-            )
-            row = cur.fetchone()
+            row = _upsert_event_moderation(cur, event_id, payload)
         conn.commit()
-    return {"status": "updated", "event_moderation": _serialize_row(row)}
+    return {"status": "updated", "event_moderation": row}
+
+
+@app.patch("/api/admin/events/bulk-moderation")
+def patch_admin_events_bulk_moderation(payload: BulkEventModerationPayload) -> dict[str, Any]:
+    if not payload.event_ids:
+        raise HTTPException(status_code=400, detail="event_ids must be non-empty")
+
+    with get_conn() as conn:
+        updated = 0
+        failed: list[dict[str, str]] = []
+        with conn.cursor() as cur:
+            for event_id in payload.event_ids:
+                try:
+                    _upsert_event_moderation(cur, event_id, payload.updates)
+                    updated += 1
+                except HTTPException as exc:
+                    failed.append({"event_id": event_id, "detail": str(exc.detail)})
+        conn.commit()
+    return {"updated": updated, "failed": failed}
 
 
 @app.get("/api/review-queue")
