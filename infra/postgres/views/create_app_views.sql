@@ -145,107 +145,120 @@ LEFT JOIN app.event_moderation_overrides emo
     ON emo.event_id = me.event_id;
 
 CREATE OR REPLACE VIEW app.gallery_records AS
-WITH base_events AS (
+WITH scraped AS (
     SELECT
-        me.event_id,
-        me.event_title,
-        me.event_type,
-        me.venue_name,
-        me.venue_address,
-        me.city,
-        me.country,
-        me.source_domain,
-        me.source_url,
-        me.crawl_timestamp,
-        re.raw_payload
+        mg.gallery_id,
+        mg.gallery_name,
+        lower(regexp_replace(COALESCE(mg.gallery_name, ''), '\s+', ' ', 'g')) AS normalized_gallery_name,
+        mg.gallery_address,
+        mg.city,
+        mg.country,
+        mg.source_domain,
+        mg.source_url,
+        'scraped'::text AS gallery_record_type,
+        mg.phone,
+        mg.email,
+        mg.website_url,
+        mg.instagram_url,
+        mg.facebook_url,
+        mg.linked_events,
+        mg.linked_artists,
+        mg.linked_artworks,
+        mg.contact_quality_score AS quality_score,
+        mg.quality_flags,
+        COALESCE(NULLIF(btrim(mg.gallery_address), ''), '') = '' AS missing_address,
+        COALESCE(NULLIF(btrim(mg.city), ''), '') = '' AS missing_city,
+        COALESCE(NULLIF(btrim(mg.country), ''), '') = '' AS missing_country,
+        COALESCE(NULLIF(btrim(mg.website_url), ''), '') = '' AS missing_website,
+        COALESCE(NULLIF(btrim(mg.email), ''), '') = '' AS missing_email,
+        COALESCE(NULLIF(btrim(mg.phone), ''), '') = '' AS missing_phone,
+        COALESCE(NULLIF(btrim(mg.instagram_url), ''), '') = '' AND COALESCE(NULLIF(btrim(mg.facebook_url), ''), '') = '' AS missing_social,
+        jsonb_array_length(COALESCE(mg.linked_events, '[]'::jsonb)) = 0 AS missing_linked_events,
+        mg.raw_payload,
+        mg.crawl_timestamp
+    FROM analytics.mart_galleries mg
+),
+inferred_events AS (
+    SELECT
+        me.*,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(me.source_domain), ''), 'unknown-source'), '\s+', ' ', 'g')) AS n_source_domain,
+        lower(regexp_replace(btrim(me.venue_name), '\s+', ' ', 'g')) AS n_gallery_name,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(me.city), ''), 'unknown-city'), '\s+', ' ', 'g')) AS n_city,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(me.country), ''), 'unknown-country'), '\s+', ' ', 'g')) AS n_country
     FROM analytics.mart_events me
-    LEFT JOIN raw.events re
-        ON re.id = me.event_id
     WHERE COALESCE(NULLIF(btrim(me.venue_name), ''), '') <> ''
+      AND NOT EXISTS (
+          SELECT 1
+          FROM analytics.mart_galleries mg
+          WHERE mg.source_domain = me.source_domain
+            AND lower(regexp_replace(COALESCE(mg.gallery_name, ''), '\s+', ' ', 'g')) = lower(regexp_replace(COALESCE(me.venue_name, ''), '\s+', ' ', 'g'))
+            AND lower(regexp_replace(COALESCE(mg.city, ''), '\s+', ' ', 'g')) = lower(regexp_replace(COALESCE(me.city, ''), '\s+', ' ', 'g'))
+            AND lower(regexp_replace(COALESCE(mg.country, ''), '\s+', ' ', 'g')) = lower(regexp_replace(COALESCE(me.country, ''), '\s+', ' ', 'g'))
+      )
 ),
-normalized AS (
-    SELECT
-        be.*,
-        lower(regexp_replace(btrim(be.venue_name), '\s+', ' ', 'g')) AS normalized_gallery_name,
-        lower(regexp_replace(COALESCE(NULLIF(btrim(be.city), ''), 'unknown-city'), '\s+', ' ', 'g')) AS normalized_city,
-        lower(regexp_replace(COALESCE(NULLIF(btrim(be.country), ''), 'unknown-country'), '\s+', ' ', 'g')) AS normalized_country
-    FROM base_events be
-),
-event_artists AS (
-    SELECT
-        maa.event_id,
-        jsonb_agg(
-            DISTINCT jsonb_build_object(
-                'artist_name', maa.artist_name,
-                'artist_profile_url', maa.artist_profile_url
-            )
-        ) FILTER (WHERE maa.artist_name IS NOT NULL) AS linked_artists
-    FROM analytics.mart_artist_activity maa
-    GROUP BY maa.event_id
-),
-rolled AS (
+inferred AS (
     SELECT
         (
-            substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 1, 8)
-            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 9, 4)
-            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 13, 4)
-            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 17, 4)
-            || '-' || substr(md5(normalized_gallery_name || '|' || normalized_city || '|' || normalized_country), 21, 12)
+            substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 1, 8)
+            || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 9, 4)
+            || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 13, 4)
+            || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 17, 4)
+            || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 21, 12)
         )::uuid AS gallery_id,
-        n.normalized_gallery_name,
-        n.normalized_city,
-        n.normalized_country,
-        MIN(n.venue_name) AS gallery_name,
-        MIN(NULLIF(btrim(n.venue_address), '')) AS gallery_address,
-        MIN(NULLIF(btrim(n.city), '')) AS city,
-        MIN(NULLIF(btrim(n.country), '')) AS country,
-        MIN(NULLIF(btrim(n.source_domain), '')) AS source_domain,
-        MIN(NULLIF(btrim(n.source_url), '')) AS source_url,
-        MAX(n.crawl_timestamp) AS crawl_timestamp,
-        jsonb_agg(
-            DISTINCT jsonb_build_object(
-                'event_id', n.event_id,
-                'event_title', n.event_title,
-                'event_type', n.event_type,
-                'source_domain', n.source_domain,
-                'source_url', n.source_url,
-                'crawl_timestamp', n.crawl_timestamp
-            )
-        ) AS linked_events,
-        COALESCE(
-            jsonb_agg(DISTINCT ea.linked_artists) FILTER (WHERE ea.linked_artists IS NOT NULL),
-            '[]'::jsonb
-        ) AS linked_artists_nested,
-        jsonb_agg(n.raw_payload) FILTER (WHERE n.raw_payload IS NOT NULL) AS raw_payload
-    FROM normalized n
-    LEFT JOIN event_artists ea
-        ON ea.event_id = n.event_id
-    GROUP BY n.normalized_gallery_name, n.normalized_city, n.normalized_country
+        MIN(me.venue_name) AS gallery_name,
+        me.n_gallery_name AS normalized_gallery_name,
+        MIN(NULLIF(btrim(me.venue_address), '')) AS gallery_address,
+        MIN(NULLIF(btrim(me.city), '')) AS city,
+        MIN(NULLIF(btrim(me.country), '')) AS country,
+        MIN(NULLIF(btrim(me.source_domain), '')) AS source_domain,
+        MIN(NULLIF(btrim(me.source_url), '')) AS source_url,
+        'inferred_from_event'::text AS gallery_record_type,
+        NULL::text AS phone,
+        NULL::text AS email,
+        NULL::text AS website_url,
+        NULL::text AS instagram_url,
+        NULL::text AS facebook_url,
+        jsonb_agg(DISTINCT jsonb_build_object('event_id', me.event_id, 'event_title', me.event_title, 'source_url', me.source_url)) AS linked_events,
+        '[]'::jsonb AS linked_artists,
+        '[]'::jsonb AS linked_artworks,
+        0::int AS quality_score,
+        ARRAY[]::text[] AS quality_flags,
+        COALESCE(NULLIF(btrim(MIN(me.venue_address)), ''), '') = '' AS missing_address,
+        COALESCE(NULLIF(btrim(MIN(me.city)), ''), '') = '' AS missing_city,
+        COALESCE(NULLIF(btrim(MIN(me.country)), ''), '') = '' AS missing_country,
+        true AS missing_website,
+        true AS missing_email,
+        true AS missing_phone,
+        true AS missing_social,
+        false AS missing_linked_events,
+        '[]'::jsonb AS raw_payload,
+        MAX(me.crawl_timestamp) AS crawl_timestamp
+    FROM inferred_events me
+    GROUP BY me.n_gallery_name, me.n_city, me.n_country, me.n_source_domain
 ),
-flattened AS (
-    SELECT
-        r.*,
-        COALESCE(
-            (
-                SELECT jsonb_agg(DISTINCT artist_item)
-                FROM jsonb_array_elements(r.linked_artists_nested) nested,
-                     jsonb_array_elements(nested) artist_item
-            ),
-            '[]'::jsonb
-        ) AS linked_artists
-    FROM rolled r
+unioned AS (
+    SELECT * FROM scraped
+    UNION ALL
+    SELECT * FROM inferred
 )
 SELECT
-    f.gallery_id,
-    f.gallery_name,
-    f.normalized_gallery_name,
-    f.gallery_address,
-    f.city,
-    f.country,
-    f.source_domain,
-    f.source_url,
-    f.linked_events,
-    f.linked_artists,
+    u.gallery_id,
+    u.gallery_name,
+    u.normalized_gallery_name,
+    u.gallery_address,
+    u.city,
+    u.country,
+    u.source_domain,
+    u.source_url,
+    u.gallery_record_type,
+    u.phone,
+    u.email,
+    u.website_url,
+    u.instagram_url,
+    u.facebook_url,
+    u.linked_events,
+    u.linked_artists,
+    u.linked_artworks,
     COALESCE(gmo.is_hidden, false) AS is_hidden,
     COALESCE(gmo.is_approved, false) AS is_approved,
     gmo.canonical_gallery_name,
@@ -253,34 +266,29 @@ SELECT
     gmo.canonical_address,
     gmo.canonical_city,
     gmo.canonical_country,
+    gmo.canonical_phone,
+    gmo.canonical_email,
+    gmo.canonical_website_url,
+    gmo.canonical_instagram_url,
+    gmo.canonical_facebook_url,
     gmo.moderation_reason,
     gmo.moderator_notes,
     gmo.updated_at,
-    (
-        (CASE WHEN COALESCE(NULLIF(btrim(f.gallery_name), ''), '') <> '' THEN 1 ELSE 0 END)
-      + (CASE WHEN COALESCE(NULLIF(btrim(f.gallery_address), ''), '') <> '' THEN 1 ELSE 0 END)
-      + (CASE WHEN COALESCE(NULLIF(btrim(f.city), ''), '') <> '' THEN 1 ELSE 0 END)
-      + (CASE WHEN COALESCE(NULLIF(btrim(f.country), ''), '') <> '' THEN 1 ELSE 0 END)
-      + (CASE WHEN COALESCE(NULLIF(btrim(f.source_domain), ''), '') <> '' OR COALESCE(NULLIF(btrim(f.source_url), ''), '') <> '' THEN 1 ELSE 0 END)
-      + (CASE WHEN jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) > 0 THEN 1 ELSE 0 END)
-    )::integer AS quality_score,
-    ARRAY_REMOVE(ARRAY[
-        CASE WHEN COALESCE(NULLIF(btrim(f.gallery_address), ''), '') = '' THEN 'missing_address' END,
-        CASE WHEN COALESCE(NULLIF(btrim(f.city), ''), '') = '' THEN 'missing_city' END,
-        CASE WHEN COALESCE(NULLIF(btrim(f.country), ''), '') = '' THEN 'missing_country' END,
-        CASE WHEN COALESCE(NULLIF(btrim(f.source_domain), ''), '') = '' AND COALESCE(NULLIF(btrim(f.source_url), ''), '') = '' THEN 'missing_website' END,
-        CASE WHEN jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) = 0 THEN 'missing_linked_events' END
-    ], NULL)::TEXT[] AS quality_flags,
-    COALESCE(NULLIF(btrim(f.gallery_address), ''), '') = '' AS missing_address,
-    COALESCE(NULLIF(btrim(f.city), ''), '') = '' AS missing_city,
-    COALESCE(NULLIF(btrim(f.country), ''), '') = '' AS missing_country,
-    COALESCE(NULLIF(btrim(f.source_domain), ''), '') = '' AND COALESCE(NULLIF(btrim(f.source_url), ''), '') = '' AS missing_website,
-    jsonb_array_length(COALESCE(f.linked_events, '[]'::jsonb)) = 0 AS missing_linked_events,
-    COALESCE(f.raw_payload, '[]'::jsonb) AS raw_payload,
-    f.crawl_timestamp
-FROM flattened f
+    u.quality_score,
+    u.quality_flags,
+    u.missing_address,
+    u.missing_city,
+    u.missing_country,
+    u.missing_website,
+    u.missing_email,
+    u.missing_phone,
+    u.missing_social,
+    u.missing_linked_events,
+    u.raw_payload,
+    u.crawl_timestamp
+FROM unioned u
 LEFT JOIN app.gallery_moderation_overrides gmo
-    ON gmo.gallery_id = f.gallery_id;
+    ON gmo.gallery_id = u.gallery_id;
 
 CREATE OR REPLACE VIEW app.artist_event_links AS
 SELECT

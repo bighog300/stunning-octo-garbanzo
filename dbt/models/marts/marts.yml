@@ -35,3 +35,12 @@ models:
       - name: event_id
         tests:
           - not_null
+
+  - name: mart_galleries
+    columns:
+      - name: gallery_id
+        tests:
+          - not_null
+      - name: source_domain
+        tests:
+          - not_null

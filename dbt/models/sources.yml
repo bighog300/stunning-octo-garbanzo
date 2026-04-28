@@ -10,5 +10,6 @@ sources:
       - name: artworks
       - name: artists
       - name: events
+      - name: galleries
       - name: event_artists
       - name: event_images

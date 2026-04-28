@@ -1,0 +1,21 @@
+select
+    id as raw_gallery_id,
+    {{ clean_text('source_domain') }} as source_domain,
+    {{ clean_text('source_url') }} as source_url,
+    {{ clean_text('source_record_id') }} as source_record_id,
+    {{ clean_text('gallery_name') }} as gallery_name,
+    {{ clean_text('address') }} as address,
+    {{ clean_text('city') }} as city,
+    {{ clean_text('region') }} as region,
+    {{ clean_text('country') }} as country,
+    {{ clean_text('phone') }} as phone,
+    lower({{ clean_text('email') }}) as email,
+    {{ clean_text('website_url') }} as website_url,
+    {{ clean_text('instagram_url') }} as instagram_url,
+    {{ clean_text('facebook_url') }} as facebook_url,
+    {{ clean_text('contact_person') }} as contact_person,
+    {{ clean_text('description') }} as description,
+    raw_payload,
+    crawl_timestamp,
+    created_at
+from {{ source('raw', 'galleries') }}

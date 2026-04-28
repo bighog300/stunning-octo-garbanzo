@@ -6,3 +6,10 @@ models:
       - name: raw_artwork_id
         tests:
           - not_null
+
+  - name: int_gallery_normalized
+    columns:
+      - name: raw_gallery_id
+        tests:
+          - not_null
+          - unique

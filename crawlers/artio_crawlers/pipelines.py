@@ -4,6 +4,7 @@ from artio_crawlers.db import (
     get_connection,
     insert_event_artist,
     insert_event_image,
+    upsert_gallery,
     upsert_artwork,
     upsert_event,
 )
@@ -73,6 +74,12 @@ class PostgresArtworkPipeline:
                     "content_hash": data.get("content_hash"),
                 },
             )
+            return item
+
+        if "contact_person" in data or "website_url" in data or "instagram_url" in data:
+            if not data.get("source_url") or not data.get("source_domain"):
+                raise ValueError("source_url and source_domain are required for GalleryItem")
+            upsert_gallery(self.conn, data)
             return item
 
         raise ValueError("Unknown item type for database pipeline")

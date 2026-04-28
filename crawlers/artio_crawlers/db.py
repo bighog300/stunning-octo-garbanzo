@@ -209,3 +209,73 @@ def insert_event_image(conn, item: dict) -> None:
             item,
         )
     conn.commit()
+
+
+def upsert_gallery(conn, item: dict) -> None:
+    has_source_record_id = bool(item.get("source_record_id"))
+    conflict_target = (
+        "(source_domain, source_record_id) WHERE source_record_id IS NOT NULL"
+        if has_source_record_id
+        else "(source_domain, source_url) WHERE source_record_id IS NULL"
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            f'''
+            INSERT INTO raw.galleries (
+                source_domain,
+                source_url,
+                source_record_id,
+                gallery_name,
+                address,
+                city,
+                region,
+                country,
+                phone,
+                email,
+                website_url,
+                instagram_url,
+                facebook_url,
+                contact_person,
+                description,
+                raw_payload,
+                crawl_timestamp
+            )
+            VALUES (
+                %(source_domain)s,
+                %(source_url)s,
+                %(source_record_id)s,
+                %(gallery_name)s,
+                %(address)s,
+                %(city)s,
+                %(region)s,
+                %(country)s,
+                %(phone)s,
+                %(email)s,
+                %(website_url)s,
+                %(instagram_url)s,
+                %(facebook_url)s,
+                %(contact_person)s,
+                %(description)s,
+                %(raw_payload)s,
+                %(crawl_timestamp)s
+            )
+            ON CONFLICT {conflict_target}
+            DO UPDATE SET
+                gallery_name = EXCLUDED.gallery_name,
+                address = EXCLUDED.address,
+                city = EXCLUDED.city,
+                region = EXCLUDED.region,
+                country = EXCLUDED.country,
+                phone = EXCLUDED.phone,
+                email = EXCLUDED.email,
+                website_url = EXCLUDED.website_url,
+                instagram_url = EXCLUDED.instagram_url,
+                facebook_url = EXCLUDED.facebook_url,
+                contact_person = EXCLUDED.contact_person,
+                description = EXCLUDED.description,
+                raw_payload = EXCLUDED.raw_payload,
+                crawl_timestamp = EXCLUDED.crawl_timestamp
+            ''',
+            {**item, "raw_payload": Json(item.get("raw_payload") or {})},
+        )
+    conn.commit()

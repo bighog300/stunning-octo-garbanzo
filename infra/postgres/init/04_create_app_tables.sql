@@ -151,6 +151,11 @@ CREATE TABLE IF NOT EXISTS app.gallery_moderation_overrides (
     canonical_address TEXT,
     canonical_city TEXT,
     canonical_country TEXT,
+    canonical_phone TEXT,
+    canonical_email TEXT,
+    canonical_website_url TEXT,
+    canonical_instagram_url TEXT,
+    canonical_facebook_url TEXT,
     moderation_reason TEXT,
     moderator_notes TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
