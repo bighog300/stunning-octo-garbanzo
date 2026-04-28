@@ -40,6 +40,33 @@ def test_crawl_tasks_use_correct_spider_and_pool():
         assert task.pool_slots == 1
 
 
+def test_crawl_tasks_use_static_city_args_and_no_broken_templates():
+    dag = _dag()
+
+    expected_city_args = {
+        "cardiff": ("united-kingdom", 12, 400),
+        "swansea": ("united-kingdom", 8, 250),
+        "newport": ("united-kingdom", 6, 200),
+        "bangor": ("united-kingdom", 5, 150),
+        "wrexham": ("united-kingdom", 5, 150),
+    }
+
+    for city in EXPECTED_CITIES:
+        country, max_pages, max_records = expected_city_args[city]
+        task = dag.get_task(f"crawl_{city}")
+        command = task.bash_command
+
+        assert f"-a city={city}" in command
+        assert f"-a country={country}" in command
+        assert f"-a max_pages={max_pages}" in command
+        assert f"-a max_records={max_records}" in command
+        assert "-a full_crawl=True" in command
+        assert "-a use_sample_data=False" in command
+
+        assert "{ dag_run.conf.get(" not in command
+        assert "{ ti.xcom_pull(" not in command
+
+
 def test_crawl_tasks_are_chained_sequentially():
     dag = _dag()
 

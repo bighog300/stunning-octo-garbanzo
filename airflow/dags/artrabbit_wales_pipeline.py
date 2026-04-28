@@ -115,19 +115,22 @@ with DAG(
     crawl_tasks = {}
     for city_config in CITY_CONFIGS:
         city = city_config["city"]
+        country = city_config["country"]
+        max_pages = city_config["max_pages"]
+        max_records = city_config["max_records"]
         crawl_tasks[city] = BashOperator(
             task_id=f"crawl_{city}",
             pool="artrabbit_pool",
             pool_slots=1,
             bash_command=f"""
-            cd /opt/artio/crawlers && scrapy crawl {SPIDER_NAME} \\
-              -a crawl_run_id={{{{ ti.xcom_pull(task_ids='create_crawl_run') }}}} \\
-              -a city={city_config['city']} \\
-              -a country={city_config['country']} \\
-              -a max_pages={city_config['max_pages']} \\
-              -a max_records={city_config['max_records']} \\
-              -a full_crawl={{{{ dag_run.conf.get('full_crawl', false) }}}} \\
-              -a use_sample_data={{{{ dag_run.conf.get('use_sample_data', false) }}}}
+            cd /opt/artio/crawlers
+            scrapy crawl {SPIDER_NAME} \\
+              -a city={city} \\
+              -a country={country} \\
+              -a full_crawl=True \\
+              -a max_pages={max_pages} \\
+              -a max_records={max_records} \\
+              -a use_sample_data=False
             """,
         )
 
