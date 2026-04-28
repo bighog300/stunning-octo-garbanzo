@@ -332,6 +332,35 @@ inferred AS (
         MAX(me.crawl_timestamp) AS crawl_timestamp
     FROM inferred_events me
     GROUP BY me.n_gallery_name, me.n_city, me.n_country, me.n_source_domain
+    HAVING NOT (
+        MIN(NULLIF(btrim(me.source_domain), '')) = 'art.co.za'
+        AND (
+            bool_or(
+                COALESCE(me.cleaned_gallery_name, '') ~* '(list your gallery|list your art exhibition|submit your gallery|advertise|login|register|sign up)'
+                OR COALESCE(me.original_gallery_name, '') ~* '(list your gallery|list your art exhibition|submit your gallery|advertise|login|register|sign up)'
+            )
+            OR bool_or(
+                (
+                    COALESCE(me.cleaned_gallery_name, '') ilike '%Art in South Africa%'
+                    OR COALESCE(me.original_gallery_name, '') ilike '%Art in South Africa%'
+                )
+                AND (
+                    COALESCE(me.cleaned_gallery_name, '') ilike '%Art.co.za%'
+                    OR COALESCE(me.original_gallery_name, '') ilike '%Art.co.za%'
+                )
+            )
+            OR (
+                char_length(trim(COALESCE(MIN(NULLIF(btrim(me.cleaned_gallery_name), '')), ''))) <= 3
+                OR lower(COALESCE(MIN(NULLIF(btrim(me.cleaned_gallery_name), '')), '')) IN (
+                    'home',
+                    'gallery',
+                    'galleries',
+                    'events',
+                    'art in south africa'
+                )
+            )
+        )
+    )
 ),
 unioned AS (
     SELECT * FROM scraped
