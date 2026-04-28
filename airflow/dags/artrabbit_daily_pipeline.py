@@ -101,8 +101,8 @@ with DAG(
 
     run_artrabbit_spider = BashOperator(
         task_id="run_artrabbit_spider",
-        bash_command="""
-        cd /opt/artio/crawlers && scrapy crawl art_rabbit_events \
+        bash_command=f"""
+        cd /opt/artio/crawlers && scrapy crawl {SPIDER_NAME} \
           -a crawl_run_id={{ ti.xcom_pull(task_ids='create_crawl_run') }} \
           -a city={{ dag_run.conf.get('city', 'london') }} \
           -a country={{ dag_run.conf.get('country', 'united-kingdom') }} \
