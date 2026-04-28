@@ -1,9 +1,11 @@
 import re
+from unittest.mock import MagicMock
 
 import pytest
 
 airflow_models = pytest.importorskip("airflow.models")
 DagBag = airflow_models.DagBag
+pipeline_module = pytest.importorskip("airflow.dags.artrabbit_multi_city_wave2_pipeline")
 
 DAG_ID = "artrabbit_multi_city_wave2_pipeline"
 EXPECTED_CITY_CONFIGS = {
@@ -119,3 +121,93 @@ def test_apply_superset_views_task_exists():
     dag = _dag()
 
     assert dag.get_task("apply_superset_views") is not None
+
+
+class _FakeCursor:
+    def __init__(self, scripted_results):
+        self.scripted_results = list(scripted_results)
+        self.executed = []
+        self._last_result = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def execute(self, query, params=None):
+        self.executed.append((query, params))
+        self._last_result = self.scripted_results.pop(0)
+
+    def fetchone(self):
+        return self._last_result
+
+    def fetchall(self):
+        return self._last_result
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def cursor(self):
+        return self._cursor
+
+
+def _build_context():
+    ti = MagicMock()
+    ti.xcom_pull.return_value = "run-123"
+    return {"ti": ti, "execution_date": "2026-04-28T19:53:32.980412+00:00"}
+
+
+def test_validate_raw_ingestion_passes_with_partial_city_coverage(monkeypatch):
+    fake_cursor = _FakeCursor(
+        [
+            (True,),
+            (4,),
+            [("bristol", 2), ("leeds", 2)],
+        ]
+    )
+    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
+
+    result = pipeline_module.validate_raw_ingestion(**_build_context())
+
+    assert result["total_events"] == 4
+    assert result["city_counts"]["bristol"] == 2
+    assert result["city_counts"]["leeds"] == 2
+    assert result["city_counts"]["newcastle"] == 0
+
+
+def test_validate_raw_ingestion_fails_with_zero_total_rows(monkeypatch):
+    fake_cursor = _FakeCursor(
+        [
+            (True,),
+            (0,),
+            [],
+        ]
+    )
+    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
+
+    with pytest.raises(ValueError, match=r"Expected > 0 new artrabbit\.com event rows, found 0"):
+        pipeline_module.validate_raw_ingestion(**_build_context())
+
+
+def test_validate_raw_ingestion_logs_zero_count_city(monkeypatch, caplog):
+    fake_cursor = _FakeCursor(
+        [
+            (True,),
+            (3,),
+            [("birmingham", 3)],
+        ]
+    )
+    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
+
+    pipeline_module.validate_raw_ingestion(**_build_context())
+
+    assert "newcastle': 0" in caplog.text
