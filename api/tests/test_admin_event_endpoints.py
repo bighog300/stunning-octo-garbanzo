@@ -37,6 +37,7 @@ class FakeCursor:
                     "source_domain": "example.com",
                     "source_name": "Example",
                     "source_url": "https://example.com/events/1",
+                    "description": "Artist talk and workshop",
                     "crawl_timestamp": "2026-04-27T00:00:00Z",
                     "is_hidden": False,
                     "is_approved": False,
@@ -59,9 +60,14 @@ class FakeCursor:
                 "original_event_type": "talk",
                 "canonical_event_type": None,
                 "raw_payload": {"raw": True},
+                "description": "Artist talk and workshop",
                 "is_hidden": False,
                 "is_approved": False,
             }
+            return
+
+        if "FROM information_schema.columns" in sql:
+            self._rows = [{"column_name": name} for name in main.EVENT_RECORD_REQUIRED_COLUMNS]
             return
 
         if "FROM app.artist_event_links" in sql:
@@ -72,6 +78,19 @@ class FakeCursor:
                     "artist_profile_url": "https://example.com/artists/alice",
                 }
             ]
+            return
+
+        if "COUNT(*)::int AS total" in sql and "FROM app.event_records" in sql:
+            self._row = {
+                "total": 10,
+                "approved": 3,
+                "hidden": 1,
+                "unmoderated": 6,
+                "missing_date": 2,
+                "missing_venue": 2,
+                "low_quality": 4,
+                "recently_crawled": 5,
+            }
             return
 
         if "SELECT 1 FROM app.event_records" in sql:
@@ -135,6 +154,8 @@ def test_list_admin_events(monkeypatch):
     assert rows[0]["event_title"] == "Studio Talk"
     assert rows[0]["original_event_title"] == "Studio Talk"
     assert rows[0]["original_event_type"] == "talk"
+    assert rows[0]["quality_score"] >= 1
+    assert "missing_source_url" in rows[0]
 
 
 def test_get_admin_event(monkeypatch):
@@ -195,3 +216,35 @@ def test_patch_admin_events_bulk_moderation_collects_failures(monkeypatch):
     response = main.patch_admin_events_bulk_moderation(payload)
     assert response["updated"] == 1
     assert response["failed"][0]["event_id"] == "missing-event-id"
+
+
+def test_list_admin_events_accepts_queue(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    rows = main.list_admin_events(limit=20, queue="needs_review")
+    assert rows
+
+
+def test_bulk_moderation_has_max_limit(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    payload = main.BulkEventModerationPayload(
+        event_ids=[f"id-{i}" for i in range(501)],
+        updates=main.EventModerationPayload(is_hidden=True),
+    )
+    try:
+        main.patch_admin_events_bulk_moderation(payload)
+        assert False, "Expected HTTPException for oversized bulk payload"
+    except main.HTTPException as exc:
+        assert exc.status_code == 400
+
+
+def test_validate_event_records_contract(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    with main.get_conn() as conn:
+        missing = main.validate_event_records_contract(conn)
+    assert missing == []
+
+
+def test_admin_moderation_metrics(monkeypatch):
+    monkeypatch.setattr(main, "get_conn", fake_get_conn)
+    payload = main.get_admin_moderation_metrics()
+    assert payload["events"]["total"] == 10
