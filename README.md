@@ -236,3 +236,7 @@ Get one artist profile (URL-encode artist name as needed):
 ```bash
 curl "http://localhost:8000/api/artists/Vincent%20van%20Gogh"
 ```
+
+## Art UK crawling status
+
+As of April 28, 2026, Art UK currently returns HTTP 403 responses to crawler requests (including `robots.txt` and artwork discovery pages). Use an official API/feed/permission route before enabling production crawling for this source.

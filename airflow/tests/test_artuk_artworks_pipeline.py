@@ -46,3 +46,12 @@ def test_dbt_and_view_tasks_exist():
 
     for task_id in ["dbt_deps", "dbt_run", "dbt_test", "apply_app_views", "apply_superset_views"]:
         assert dag.get_task(task_id) is not None
+
+
+def test_run_task_reports_blocked_outcome_to_xcom():
+    dag = _dag()
+    task = dag.get_task("run_artuk_spider")
+
+    assert task.do_xcom_push is True
+    assert "Art UK returned 403; source may require API/feed/permission." in task.bash_command
+    assert "echo blocked" in task.bash_command

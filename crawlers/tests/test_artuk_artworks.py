@@ -1,10 +1,28 @@
 from artio_crawlers.spiders.artuk_artworks import ArtUkArtworksSpider
 from scrapy.http import Request, TextResponse
+from unittest.mock import Mock
 
 
-def _html_response(url: str, body: str) -> TextResponse:
+def _html_response(url: str, body: str, status: int = 200) -> TextResponse:
     request = Request(url=url)
-    return TextResponse(url=url, request=request, body=body.encode("utf-8"), encoding="utf-8")
+    return TextResponse(url=url, request=request, body=body.encode("utf-8"), encoding="utf-8", status=status)
+
+
+class _DummyStats:
+    def __init__(self):
+        self._values = {}
+
+    def get_value(self, key):
+        return self._values.get(key)
+
+    def set_value(self, key, value):
+        self._values[key] = value
+
+
+class _DummyCrawler:
+    def __init__(self):
+        self.stats = _DummyStats()
+        self.engine = Mock()
 
 
 def test_listing_parser_extracts_artwork_links_only():
@@ -169,3 +187,17 @@ def test_footer_social_navigation_links_ignored_for_websites():
     website = spider._extract_onsite_website_url(response)
 
     assert website == "https://example-gallery.org"
+
+
+def test_robots_403_closes_spider_and_sets_blocked_stat():
+    spider = ArtUkArtworksSpider(max_pages=2, max_records=25)
+    crawler = _DummyCrawler()
+    spider._crawler = crawler
+
+    response = _html_response("https://artuk.org/robots.txt", "User-agent: *", status=403)
+
+    output = list(spider.parse_robots_check(response))
+
+    assert output == []
+    assert crawler.stats.get_value("artuk/source_blocked") == 1
+    crawler.engine.close_spider.assert_called_once_with(spider, "artuk_source_blocked_403")
