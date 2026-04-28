@@ -17,8 +17,16 @@ class ArtRabbitEventsSpider(scrapy.Spider):
 
     custom_settings = {
         "ROBOTSTXT_OBEY": True,
-        "DOWNLOAD_DELAY": 1.0,
-        "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "AUTOTHROTTLE_ENABLED": True,
+        "AUTOTHROTTLE_START_DELAY": 3,
+        "AUTOTHROTTLE_MAX_DELAY": 30,
+        "AUTOTHROTTLE_TARGET_CONCURRENCY": 0.5,
+        "DOWNLOAD_DELAY": 3,
+        "RANDOMIZE_DOWNLOAD_DELAY": True,
+        "CONCURRENT_REQUESTS": 2,
+        "CONCURRENT_REQUESTS_PER_DOMAIN": 1,
+        "RETRY_HTTP_CODES": [429, 500, 502, 503, 504, 522, 524, 408],
+        "RETRY_TIMES": 4,
     }
 
     DATE_RANGE_PATTERN = re.compile(
@@ -569,3 +577,11 @@ class ArtRabbitEventsSpider(scrapy.Spider):
 
     def _limit_reached(self) -> bool:
         return (not self.full_crawl) and self._records_emitted >= self.max_records
+
+    def closed(self, reason: str) -> None:
+        stats = getattr(self.crawler, "stats", None)
+        if stats is None:
+            return
+        response_429_count = int(stats.get_value("downloader/response_status_count/429", 0) or 0)
+        stats.set_value("artrabbit/response_429_count", response_429_count)
+        self.logger.info("crawl_finished reason=%s response_status_count_429=%s", reason, response_429_count)
