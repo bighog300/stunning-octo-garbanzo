@@ -167,11 +167,18 @@ class ArtCoZaEventsSpider(scrapy.Spider):
             image_item["content_hash"] = content_hash(response.url, image_url, title)
             yield image_item
 
-        gallery_item = self._extract_gallery_item(response, title, description, artists)
-        if gallery_item is not None:
-            yield gallery_item
+        yield from self._extract_gallery_outputs(response, title, description, artists)
 
         self._records_emitted += 1
+
+    def parse_gallery_detail(self, response: scrapy.http.Response):
+        context = response.meta.get("gallery_context") or {}
+        gallery_item = self._extract_gallery_item(response, context.get("title"), context.get("description"), context.get("artists") or [])
+        if gallery_item is not None:
+            listing_source_url = context.get("listing_source_url")
+            if listing_source_url:
+                gallery_item["raw_payload"]["listing_source_url"] = listing_source_url
+            yield gallery_item
 
     def _extract_candidate_event_links(self, response: scrapy.http.Response) -> list[str]:
         links = []
@@ -372,39 +379,14 @@ class ArtCoZaEventsSpider(scrapy.Spider):
     ) -> GalleryItem | None:
         if "/galleries/" not in response.url.lower():
             return None
-        gallery_name = self._clean_text(
-            self._extract_value_after_label(response, ["gallery", "venue", "name"]) or title
-        )
+        gallery_name = self._clean_text(self._extract_value_after_label(response, ["gallery", "venue", "name"]) or title)
         if not gallery_name:
             return None
 
-        social_links: dict[str, str | None] = {"instagram": None, "facebook": None, "website": None}
-        email: str | None = None
-        phone: str | None = None
-        for href in response.css("a::attr(href)").getall():
-            absolute = response.urljoin(href)
-            lower = absolute.lower()
-            if lower.startswith("mailto:"):
-                email = email or absolute.split(":", 1)[1].strip()
-            elif lower.startswith("tel:"):
-                phone = phone or absolute.split(":", 1)[1].strip()
-            elif "instagram.com" in lower:
-                social_links["instagram"] = absolute
-            elif "facebook.com" in lower:
-                social_links["facebook"] = absolute
-            elif "art.co.za" not in lower and lower.startswith(("http://", "https://")):
-                social_links["website"] = social_links["website"] or absolute
-
-        detail_text = " ".join(self._text_blocks(response))
-        if not email:
-            email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", detail_text, flags=re.IGNORECASE)
-            email = email_match.group(0) if email_match else None
-        if not phone:
-            phone_match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", detail_text)
-            phone = phone_match.group(0) if phone_match else None
-
-        city = self._extract_city(response, None)
-        address = self._extract_value_after_label(response, ["address", "venue"])
+        contacts = self._extract_contact_fields(response)
+        location = self._extract_location_fields(response)
+        city = location.get("city")
+        address = location.get("address")
         slug = self._gallery_slug(response.url)
         item = GalleryItem()
         item["crawl_run_id"] = self.crawl_run_id
@@ -416,19 +398,139 @@ class ArtCoZaEventsSpider(scrapy.Spider):
         item["city"] = city
         item["region"] = None
         item["country"] = "South Africa"
-        item["phone"] = self._clean_text(phone)
-        item["email"] = self._clean_text(email).lower() if email else None
-        item["website_url"] = social_links["website"]
-        item["instagram_url"] = social_links["instagram"]
-        item["facebook_url"] = social_links["facebook"]
+        item["phone"] = contacts["phone"]
+        item["email"] = contacts["email"]
+        item["website_url"] = contacts["website_url"]
+        item["instagram_url"] = contacts["instagram_url"]
+        item["facebook_url"] = contacts["facebook_url"]
         item["contact_person"] = None
         item["description"] = description
         item["raw_payload"] = {
             "represented_artists": artists,
+            "contact": contacts["raw_contact_text"],
+            "location": location["raw_location_text"],
+            "address": item["address"],
             "detail_links": [response.urljoin(h) for h in response.css("a::attr(href)").getall() if h],
         }
         item["crawl_timestamp"] = datetime.now(UTC).isoformat()
         return item
+
+    def _extract_gallery_outputs(
+        self,
+        response: scrapy.http.Response,
+        title: str | None,
+        description: str | None,
+        artists: list[dict[str, str | None]],
+    ):
+        if "/galleries/" not in response.url.lower():
+            return
+
+        detail_links = self._extract_gallery_detail_links(response)
+        if detail_links:
+            for detail_link in detail_links:
+                if not self._remember_url(detail_link):
+                    continue
+                yield response.follow(
+                    detail_link,
+                    callback=self.parse_gallery_detail,
+                    meta={
+                        "gallery_context": {
+                            "title": title,
+                            "description": description,
+                            "artists": artists,
+                            "listing_source_url": response.url,
+                        }
+                    },
+                )
+            return
+
+        gallery_item = self._extract_gallery_item(response, title, description, artists)
+        if gallery_item is not None:
+            yield gallery_item
+
+    def _extract_gallery_detail_links(self, response: scrapy.http.Response) -> list[str]:
+        detail_links: list[str] = []
+        for href in response.css("a::attr(href)").getall():
+            absolute = self._normalize_and_validate_url(response, href)
+            if not absolute:
+                continue
+            path = urlparse(absolute).path.lower()
+            if "/galleries/" not in path:
+                continue
+            if path.endswith("/opening.php") or path.endswith("/running.php"):
+                continue
+            detail_links.append(absolute)
+        return list(dict.fromkeys(detail_links))
+
+    def _extract_location_fields(self, response: scrapy.http.Response) -> dict[str, str | None]:
+        address = self._extract_value_after_label(response, ["address", "location", "venue"])
+        location_block = self._extract_labeled_block_text(response, ["address", "location", "contact"])
+        if not address and location_block:
+            address_lines = [line.strip(" ,;") for line in re.split(r"\n|;", location_block) if line.strip()]
+            address = address_lines[0] if address_lines else None
+        address = self._clean_text(address)
+        if address and address.lower() == (self._clean_text(response.css("title::text").get()) or "").lower():
+            address = None
+        city = self._extract_city(response, address)
+        if not address and city:
+            address = None
+        return {"address": address, "city": city, "raw_location_text": self._clean_text(location_block)}
+
+    def _extract_contact_fields(self, response: scrapy.http.Response) -> dict[str, str | None]:
+        social_links: dict[str, str | None] = {"instagram_url": None, "facebook_url": None, "website_url": None}
+        email: str | None = None
+        phone: str | None = None
+        for href in response.css("a::attr(href)").getall():
+            absolute = response.urljoin(href).strip()
+            lower = absolute.lower()
+            parsed = urlparse(absolute)
+            host = parsed.netloc.lower()
+            if lower.startswith("mailto:"):
+                email = email or absolute.split(":", 1)[1].strip().lower()
+            elif lower.startswith("tel:"):
+                phone = phone or self._clean_text(absolute.split(":", 1)[1].strip())
+            elif "instagram.com" in host:
+                social_links["instagram_url"] = social_links["instagram_url"] or absolute
+            elif "facebook.com" in host:
+                social_links["facebook_url"] = social_links["facebook_url"] or absolute
+            elif parsed.scheme in {"http", "https"} and host and "art.co.za" not in host:
+                if "instagram.com" not in host and "facebook.com" not in host:
+                    social_links["website_url"] = social_links["website_url"] or absolute
+
+        detail_text = " ".join(self._text_blocks(response))
+        contact_block = self._extract_labeled_block_text(response, ["contact", "tel", "phone", "email", "website"])
+        contact_text = " ".join(part for part in [contact_block, detail_text] if part)
+        if not email:
+            email_match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", contact_text, flags=re.IGNORECASE)
+            email = email_match.group(0).lower() if email_match else None
+        if not phone:
+            phone_match = re.search(r"(?:\+?\d[\d\s().-]{7,}\d)", contact_text)
+            phone = self._clean_text(phone_match.group(0)) if phone_match else None
+        if not social_links["website_url"]:
+            website_match = re.search(r"https?://[^\s)]+", contact_text, flags=re.IGNORECASE)
+            if website_match and "art.co.za" not in website_match.group(0).lower():
+                social_links["website_url"] = website_match.group(0)
+
+        return {
+            "phone": self._clean_text(phone),
+            "email": email,
+            "website_url": social_links["website_url"],
+            "instagram_url": social_links["instagram_url"],
+            "facebook_url": social_links["facebook_url"],
+            "raw_contact_text": self._clean_text(contact_block),
+        }
+
+    def _extract_labeled_block_text(self, response: scrapy.http.Response, labels: list[str]) -> str | None:
+        lower_labels = tuple(label.lower() for label in labels)
+        candidate_lines = []
+        for block in response.css("p, li, div, td"):
+            text = self._clean_text(" ".join(t.strip() for t in block.css("::text").getall() if t.strip()))
+            if not text:
+                continue
+            lower = text.lower()
+            if any(label in lower for label in lower_labels):
+                candidate_lines.append(text)
+        return "\n".join(candidate_lines) if candidate_lines else None
 
     @staticmethod
     def _gallery_slug(url: str) -> str:
