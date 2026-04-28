@@ -136,3 +136,74 @@ def test_irrelevant_pages_do_not_follow_links() -> None:
 
     requests = list(spider.parse(response))
     assert requests == []
+
+
+def test_gallery_listing_follows_gallery_detail_page_when_available() -> None:
+    spider = ArtCoZaEventsSpider(max_records=5)
+    response = _html_response(
+        "https://www.art.co.za/galleries/opening.php?nom=show-1",
+        """
+        <html><body>
+            <h1>Opening this week</h1>
+            <a href="/galleries/cool-gallery.php?nom=cool-gallery">Cool Gallery</a>
+        </body></html>
+        """,
+    )
+
+    outputs = list(
+        spider._extract_gallery_outputs(
+            response,
+            title="Cool Gallery Opening",
+            description="A show",
+            artists=[{"name": "Jane Doe", "profile_url": None}],
+        )
+    )
+
+    assert len(outputs) == 1
+    assert outputs[0].url == "https://www.art.co.za/galleries/cool-gallery.php?nom=cool-gallery"
+
+
+def test_gallery_detail_extraction_parses_address_contact_and_external_socials() -> None:
+    spider = ArtCoZaEventsSpider(max_records=5, crawl_run_id="run-123")
+    request = Request(
+        url="https://www.art.co.za/galleries/cool-gallery.php?nom=cool-gallery",
+        meta={
+            "gallery_context": {
+                "title": "Cool Gallery",
+                "description": "Gallery description",
+                "artists": [{"name": "Jane Doe", "profile_url": None}],
+                "listing_source_url": "https://www.art.co.za/galleries/opening.php?nom=show-1",
+            }
+        },
+    )
+    response = TextResponse(
+        url=request.url,
+        request=request,
+        body="""
+        <html><body>
+            <h1>Cool Gallery</h1>
+            <p>Address: 12 Loop Street, Cape Town</p>
+            <p>Contact: Tel +27 21 123 4567 Email info@coolgallery.co.za Website https://coolgallery.co.za</p>
+            <a href="mailto:info@coolgallery.co.za">Email</a>
+            <a href="tel:+27211234567">Call</a>
+            <a href="https://www.instagram.com/coolgallery/">Instagram</a>
+            <a href="https://www.facebook.com/coolgallery/">Facebook</a>
+            <a href="https://www.art.co.za/facebook/">Artcoza Facebook</a>
+        </body></html>
+        """.encode("utf-8"),
+        encoding="utf-8",
+    )
+
+    items = list(spider.parse_gallery_detail(response))
+    assert len(items) == 1
+    item = items[0]
+    assert item["source_record_id"] == "art.co.za:gallery:cool-gallery"
+    assert item["address"] == "12 Loop Street, Cape Town"
+    assert item["city"] == "Cape Town"
+    assert item["phone"] == "+27211234567"
+    assert item["email"] == "info@coolgallery.co.za"
+    assert item["website_url"] == "https://coolgallery.co.za"
+    assert item["instagram_url"] == "https://www.instagram.com/coolgallery/"
+    assert item["facebook_url"] == "https://www.facebook.com/coolgallery/"
+    assert item["raw_payload"]["listing_source_url"] == "https://www.art.co.za/galleries/opening.php?nom=show-1"
+    assert "Contact: Tel" in item["raw_payload"]["contact"]
