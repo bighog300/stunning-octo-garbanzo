@@ -26,6 +26,26 @@ examples as (
                 'art.co.za',
                 'Slow Down Tiger at Everard Read Johannesburg | Art.co.za Art Exhibition Listings',
                 'Everard Read Johannesburg'
+            ),
+            (
+                'art.co.za',
+                'Blue Door Print Studio | Art.co.za Art Training',
+                'Blue Door Print Studio'
+            ),
+            (
+                'art.co.za',
+                'Ibi Artworx | Art.co.za Art Training',
+                'Ibi Artworx'
+            ),
+            (
+                'art.co.za',
+                'Art Classes With Marrianna Booyens | Art.co.za Art Training',
+                'Art Classes With Marrianna Booyens'
+            ),
+            (
+                'art.co.za',
+                'Self-exploration Portrait Painting Workshops & Mixed-media Art Workshops | Art.co.za Art Training',
+                'Self-exploration Portrait Painting Workshops & Mixed-media Art Workshops'
             )
     ) as t(source_domain, original_gallery_name, expected_gallery_name)
 ),
@@ -49,12 +69,17 @@ normalized as (
                             regexp_replace(
                                 regexp_replace(
                                     regexp_replace(
-                                        btrim(e.original_gallery_name),
-                                        '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                        regexp_replace(
+                                            btrim(e.original_gallery_name),
+                                            '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                            '',
+                                            'i'
+                                        ),
+                                        '\s+\|\s+Art\.co\.za Art Gallery Listings$',
                                         '',
                                         'i'
                                     ),
-                                    '\s+\|\s+Art\.co\.za Art Gallery Listings$',
+                                    '\s+\|\s+Art\.co\.za Art Training$',
                                     '',
                                     'i'
                                 ),
@@ -82,3 +107,5 @@ cross join mart_galleries_dependency d
 where n.cleaned_gallery_name <> n.expected_gallery_name
    or n.cleaned_gallery_name like '%| Art.co.za Art Exhibition Listings%'
    or n.cleaned_gallery_name like '%| Art.co.za Art Gallery Listings%'
+   or n.cleaned_gallery_name like '%| Art.co.za Art Training%'
+   or n.cleaned_gallery_name like '%| Art.co.za%'
