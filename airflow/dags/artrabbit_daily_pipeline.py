@@ -101,15 +101,17 @@ with DAG(
 
     run_artrabbit_spider = BashOperator(
         task_id="run_artrabbit_spider",
+        pool="artrabbit_pool",
+        pool_slots=1,
         bash_command=f"""
         cd /opt/artio/crawlers && scrapy crawl {SPIDER_NAME} \
-          -a crawl_run_id={{ ti.xcom_pull(task_ids='create_crawl_run') }} \
-          -a city={{ dag_run.conf.get('city', 'london') }} \
-          -a country={{ dag_run.conf.get('country', 'united-kingdom') }} \
-          -a max_pages={{ dag_run.conf.get('max_pages', 10) }} \
-          -a max_records={{ dag_run.conf.get('max_records', 500) }} \
-          -a full_crawl={{ dag_run.conf.get('full_crawl', false) }} \
-          -a use_sample_data={{ dag_run.conf.get('use_sample_data', false) }}
+          -a crawl_run_id={{{{ ti.xcom_pull(task_ids='create_crawl_run') }}}} \
+          -a city={{{{ dag_run.conf.get('city', 'london') }}}} \
+          -a country={{{{ dag_run.conf.get('country', 'united-kingdom') }}}} \
+          -a max_pages={{{{ dag_run.conf.get('max_pages', 10) }}}} \
+          -a max_records={{{{ dag_run.conf.get('max_records', 500) }}}} \
+          -a full_crawl={{{{ dag_run.conf.get('full_crawl', false) }}}} \
+          -a use_sample_data={{{{ dag_run.conf.get('use_sample_data', false) }}}}
         """,
     )
 
