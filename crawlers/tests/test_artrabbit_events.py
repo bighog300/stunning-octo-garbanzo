@@ -74,7 +74,7 @@ def test_detail_extracts_event_core_fields() -> None:
     assert event["venue_address"] == "10 Example Street, London"
 
 
-def test_detail_uses_seo_fallback_and_rejects_save_this_event_address() -> None:
+def test_detail_uses_seo_fallback_and_rejects_save_event_address() -> None:
     spider = ArtRabbitEventsSpider(crawl_run_id="run-1")
     response = _html_response(
         "https://www.artrabbit.com/events/beyond-reflection",
@@ -85,9 +85,9 @@ def test_detail_uses_seo_fallback_and_rejects_save_this_event_address() -> None:
             </head>
             <body>
               <main>
-                <h1>Save this event</h1>
+                <h1>Save Event</h1>
                 <div class="venue-details">
-                  <p>Save this event</p>
+                  <p>Save Event</p>
                 </div>
               </main>
             </body>
@@ -105,6 +105,10 @@ def test_detail_uses_seo_fallback_and_rejects_save_this_event_address() -> None:
     assert event["venue_name"] == "The Fitzrovia Gallery"
     assert event["city"] == "London"
     assert event["venue_address"] is None
+
+    gallery_items = [item for item in outputs if "gallery_name" in item]
+    assert len(gallery_items) == 1
+    assert gallery_items[0]["address"] is None
 
 
 def test_detail_emits_gallery_with_address_and_website() -> None:

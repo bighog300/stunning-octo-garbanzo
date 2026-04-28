@@ -59,13 +59,16 @@ class ArtRabbitEventsSpider(scrapy.Spider):
         "/search",
     )
     INVALID_TEXT_VALUES = {
+        "save event",
         "save this event",
-        "login",
-        "artrabbit",
+        "saved",
         "share",
-        "follow",
         "add to calendar",
+        "login",
+        "follow",
+        "artrabbit",
     }
+    SAVE_EVENT_PATTERN = re.compile(r"^save\s+event$", re.IGNORECASE)
 
     def __init__(
         self,
@@ -469,7 +472,9 @@ class ArtRabbitEventsSpider(scrapy.Spider):
         if not cleaned:
             return True
         lowered = cleaned.lower()
-        if any(bad in lowered for bad in self.INVALID_TEXT_VALUES):
+        if lowered in self.INVALID_TEXT_VALUES:
+            return True
+        if self.SAVE_EVENT_PATTERN.match(cleaned):
             return True
         if lowered.startswith("breadcrumb"):
             return True
