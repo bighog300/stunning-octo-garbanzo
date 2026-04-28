@@ -6,6 +6,7 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import scrapy
+from scrapy.spidermiddlewares.httperror import HttpError
 
 from artio_crawlers.items import ArtworkItem, GalleryItem
 from artio_crawlers.utils.hashing import content_hash
@@ -39,6 +40,11 @@ class ArtUkArtworksSpider(scrapy.Spider):
         "/visit/venues",
         "/search",
     )
+
+    BLOCKED_MESSAGE = "Art UK returned 403; source may require API/feed/permission."
+    SOURCE_BLOCKED_REASON = "artuk_source_blocked_403"
+    SOURCE_BLOCKED_STAT = "artuk/source_blocked"
+
     DISALLOWED_PATH_HINTS = (
         "/log-in",
         "/login",
@@ -118,10 +124,28 @@ class ArtUkArtworksSpider(scrapy.Spider):
             yield scrapy.Request("https://example.com/", callback=self.parse_sample_data, dont_filter=True)
             return
 
+        yield scrapy.Request(
+            "https://artuk.org/robots.txt",
+            callback=self.parse_robots_check,
+            errback=self._on_source_check_error,
+            dont_filter=True,
+            meta={"handle_httpstatus_list": [403]},
+        )
+
+    def parse_robots_check(self, response: scrapy.http.Response):
+        if response.status == 403:
+            self._close_as_source_blocked(status=response.status, url=response.url, reason="robots_txt_403")
+            return
+
         for url in self._start_listing_urls():
             canonical = self._canonicalize_url(url)
             self._queued_listing_urls.add(canonical)
-            yield scrapy.Request(canonical, callback=self.parse)
+            yield scrapy.Request(
+                canonical,
+                callback=self.parse,
+                errback=self._on_source_check_error,
+                meta={"handle_httpstatus_list": [403]},
+            )
 
     def parse_sample_data(self, response: scrapy.http.Response):
         del response
@@ -157,6 +181,10 @@ class ArtUkArtworksSpider(scrapy.Spider):
             yield item
 
     def parse(self, response: scrapy.http.Response):
+        if response.status == 403:
+            self._close_as_source_blocked(status=response.status, url=response.url, reason="start_url_403")
+            return
+
         listing_url = self._canonicalize_url(response.url)
         if listing_url in self._seen_listing_urls:
             return
@@ -189,7 +217,12 @@ class ArtUkArtworksSpider(scrapy.Spider):
             if next_url in self._seen_listing_urls or next_url in self._queued_listing_urls:
                 continue
             self._queued_listing_urls.add(next_url)
-            yield response.follow(next_url, callback=self.parse)
+            yield response.follow(
+                next_url,
+                callback=self.parse,
+                errback=self._on_source_check_error,
+                meta={"handle_httpstatus_list": [403]},
+            )
 
     def parse_artwork(self, response: scrapy.http.Response):
         if self._limit_reached():
@@ -308,6 +341,31 @@ class ArtUkArtworksSpider(scrapy.Spider):
         gallery_item = self._build_gallery_item(response, collection_name, collection_source_url, place_data)
         if gallery_item is not None:
             yield gallery_item
+
+    def _on_source_check_error(self, failure):
+        if failure.check(HttpError):
+            response = failure.value.response
+            if response is not None and response.status == 403:
+                self._close_as_source_blocked(status=response.status, url=response.url, reason="http_error_403")
+                return
+
+        self.logger.error("Art UK source availability check failed: %s", failure)
+
+    def _close_as_source_blocked(self, status: int, url: str, reason: str) -> None:
+        crawler = getattr(self, "crawler", None) or getattr(self, "_crawler", None)
+        if crawler is None:
+            self.logger.error("%s", self.BLOCKED_MESSAGE)
+            self.logger.error("artuk_source_blocked status=%s url=%s reason=%s", status, url, reason)
+            return
+
+        if crawler.stats.get_value(self.SOURCE_BLOCKED_STAT):
+            return
+
+        crawler.stats.set_value(self.SOURCE_BLOCKED_STAT, 1)
+        crawler.stats.set_value("artuk/source_blocked_reason", reason)
+        self.logger.error("%s", self.BLOCKED_MESSAGE)
+        self.logger.error("artuk_source_blocked status=%s url=%s reason=%s", status, url, reason)
+        crawler.engine.close_spider(self, self.SOURCE_BLOCKED_REASON)
 
     def _build_gallery_item(self, response: scrapy.http.Response, collection_name: str | None, collection_source_url: str | None, place_data: dict | None) -> GalleryItem | None:
         if not collection_name:

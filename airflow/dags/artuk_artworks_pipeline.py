@@ -54,6 +54,7 @@ def create_crawl_run(**context):
 
 def validate_raw_ingestion(**context):
     crawl_run_id = context["ti"].xcom_pull(task_ids="create_crawl_run")
+    crawl_outcome = (context["ti"].xcom_pull(task_ids="run_artuk_spider") or "").strip()
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -65,6 +66,9 @@ def validate_raw_ingestion(**context):
                 (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
             )
             artwork_count = cur.fetchone()[0]
+
+    if crawl_outcome == "blocked" and artwork_count == 0:
+        raise ValueError("Art UK source blocked (403): crawl produced zero records. Acquire official API/feed/permission before enabling pipeline.")
 
     if artwork_count < 1:
         raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} artwork row, found {artwork_count}")
@@ -89,14 +93,24 @@ with DAG(
         task_id="run_artuk_spider",
         pool="artuk_pool",
         pool_slots=1,
+        do_xcom_push=True,
         bash_command="""
+        RUN_ID={{ ti.xcom_pull(task_ids='create_crawl_run') }}
+        LOG_FILE=/tmp/artuk_spider_${RUN_ID}.log
+
         cd /opt/artio/crawlers && scrapy crawl artuk_artworks \
-          -a crawl_run_id={{ ti.xcom_pull(task_ids='create_crawl_run') }} \
+          -a crawl_run_id=${RUN_ID} \
           -a max_pages={{ dag_run.conf.get('max_pages', 5) }} \
           -a max_records={{ dag_run.conf.get('max_records', 100) }} \
           -a full_crawl={{ dag_run.conf.get('full_crawl', false) }} \
           -a use_sample_data={{ dag_run.conf.get('use_sample_data', false) }} \
-          -a search_query={{ dag_run.conf.get('search_query', '') }}
+          -a search_query={{ dag_run.conf.get('search_query', '') }} 2>&1 | tee ${LOG_FILE}
+
+        if grep -q "Art UK returned 403; source may require API/feed/permission." ${LOG_FILE} || grep -q "'artuk/source_blocked': 1" ${LOG_FILE}; then
+          echo blocked
+        else
+          echo ok
+        fi
         """,
     )
 
