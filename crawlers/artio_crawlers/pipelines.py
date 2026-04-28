@@ -76,7 +76,7 @@ class PostgresArtworkPipeline:
             )
             return item
 
-        if "contact_person" in data or "website_url" in data or "instagram_url" in data:
+        if "gallery_name" in data or "contact_person" in data or "website_url" in data or "instagram_url" in data:
             if not data.get("source_url") or not data.get("source_domain"):
                 raise ValueError("source_url and source_domain are required for GalleryItem")
             upsert_gallery(self.conn, data)
