@@ -201,12 +201,17 @@ inferred_events AS (
                             regexp_replace(
                                 regexp_replace(
                                     regexp_replace(
-                                        btrim(me.venue_name),
-                                        '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                        regexp_replace(
+                                            btrim(me.venue_name),
+                                            '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                            '',
+                                            'i'
+                                        ),
+                                        '\s+\|\s+Art\.co\.za Art Gallery Listings$',
                                         '',
                                         'i'
                                     ),
-                                    '\s+\|\s+Art\.co\.za Art Gallery Listings$',
+                                    '\s+\|\s+Art\.co\.za Art Training$',
                                     '',
                                     'i'
                                 ),
@@ -240,12 +245,17 @@ inferred_events AS (
                                 regexp_replace(
                                     regexp_replace(
                                         regexp_replace(
-                                            btrim(me.venue_name),
-                                            '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                            regexp_replace(
+                                                btrim(me.venue_name),
+                                                '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                                '',
+                                                'i'
+                                            ),
+                                            '\s+\|\s+Art\.co\.za Art Gallery Listings$',
                                             '',
                                             'i'
                                         ),
-                                        '\s+\|\s+Art\.co\.za Art Gallery Listings$',
+                                        '\s+\|\s+Art\.co\.za Art Training$',
                                         '',
                                         'i'
                                     ),
@@ -305,9 +315,8 @@ inferred AS (
         array_remove(array[
             case
                 when bool_or(
-                    me.original_gallery_name ilike '%Art.co.za Art Exhibition Listings%'
-                    or me.original_gallery_name ilike '%Art.co.za Art Gallery Listings%'
-                    or me.original_gallery_name like '% | %'
+                    me.cleaned_gallery_name like '%|%'
+                    or me.cleaned_gallery_name ilike '%Art.co.za%'
                 ) then 'noisy_inferred_name'
             end
         ], null)::text[] AS quality_flags,
