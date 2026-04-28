@@ -4,7 +4,7 @@ with deduped as (
         select
             g.*,
             row_number() over (
-                partition by coalesce(nullif(g.source_record_id, ''), g.source_url)
+                partition by coalesce(nullif(g.source_record_id, ''), nullif(g.source_url, ''), g.normalized_gallery_key)
                 order by g.crawl_timestamp desc nulls last, g.created_at desc nulls last
             ) as dedupe_rank
         from {{ ref('int_gallery_normalized') }} g
@@ -78,6 +78,7 @@ select
     d.source_url,
     d.source_record_id,
     d.gallery_name,
+    d.original_gallery_name,
     d.address as gallery_address,
     d.city,
     d.region,
