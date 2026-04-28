@@ -2,13 +2,16 @@
 
 This repository includes Superset-ready SQL views so dashboards can be recreated consistently across environments without editing Superset metadata tables directly.
 
-## 1) Apply the Superset views
+## 1) Apply schema permissions and Superset views
 
 From the repository root, run:
 
 ```bash
+cat infra/postgres/init/11_grant_superset_schema_permissions.sql | docker compose exec -T postgres psql -U postgres -d artio
 cat infra/postgres/views/create_superset_views.sql | docker compose exec -T postgres psql -U postgres -d artio
 ```
+
+The first command ensures the `artio` role can manage objects inside `superset` schema (needed by Airflow's `apply_superset_views` task).
 
 This creates/updates:
 

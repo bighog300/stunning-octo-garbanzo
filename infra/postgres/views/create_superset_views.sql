@@ -1,5 +1,8 @@
 \connect artio
 
+-- Keep the superset schema creation here so the view script is self-contained.
+-- Schema grants/ownership are managed by infra/postgres/init/11_grant_superset_schema_permissions.sql,
+-- which must be applied as postgres before Airflow runs this script as the artio role.
 CREATE SCHEMA IF NOT EXISTS superset;
 
 CREATE OR REPLACE VIEW superset.gallery_quality_summary AS
