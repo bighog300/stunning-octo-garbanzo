@@ -149,6 +149,7 @@ WITH scraped AS (
     SELECT
         mg.gallery_id,
         mg.gallery_name,
+        mg.gallery_name AS original_gallery_name,
         lower(regexp_replace(COALESCE(mg.gallery_name, ''), '\s+', ' ', 'g')) AS normalized_gallery_name,
         mg.gallery_address,
         mg.city,
@@ -182,7 +183,85 @@ inferred_events AS (
     SELECT
         me.*,
         lower(regexp_replace(COALESCE(NULLIF(btrim(me.source_domain), ''), 'unknown-source'), '\s+', ' ', 'g')) AS n_source_domain,
-        lower(regexp_replace(btrim(me.venue_name), '\s+', ' ', 'g')) AS n_gallery_name,
+        btrim(me.venue_name) AS original_gallery_name,
+        regexp_replace(
+            btrim(
+                CASE
+                    WHEN lower(COALESCE(NULLIF(btrim(me.source_domain), ''), '')) = 'art.co.za' THEN
+                        COALESCE(
+                            NULLIF(
+                                regexp_replace(
+                                    btrim(me.venue_name),
+                                    '^(.*)\s+at\s+(.*)\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                    '\2',
+                                    'i'
+                                ),
+                                btrim(me.venue_name)
+                            ),
+                            regexp_replace(
+                                regexp_replace(
+                                    regexp_replace(
+                                        btrim(me.venue_name),
+                                        '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                        '',
+                                        'i'
+                                    ),
+                                    '\s+\|\s+Art\.co\.za Art Gallery Listings$',
+                                    '',
+                                    'i'
+                                ),
+                                '\s+\|\s+Art\.co\.za$',
+                                '',
+                                'i'
+                            )
+                        )
+                    ELSE btrim(me.venue_name)
+                END
+            ),
+            '\s+',
+            ' ',
+            'g'
+        ) AS cleaned_gallery_name,
+        lower(regexp_replace(COALESCE(NULLIF(btrim(
+            regexp_replace(
+                btrim(
+                    CASE
+                        WHEN lower(COALESCE(NULLIF(btrim(me.source_domain), ''), '')) = 'art.co.za' THEN
+                            COALESCE(
+                                NULLIF(
+                                    regexp_replace(
+                                        btrim(me.venue_name),
+                                        '^(.*)\s+at\s+(.*)\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                        '\2',
+                                        'i'
+                                    ),
+                                    btrim(me.venue_name)
+                                ),
+                                regexp_replace(
+                                    regexp_replace(
+                                        regexp_replace(
+                                            btrim(me.venue_name),
+                                            '\s+\|\s+Art\.co\.za Art Exhibition Listings$',
+                                            '',
+                                            'i'
+                                        ),
+                                        '\s+\|\s+Art\.co\.za Art Gallery Listings$',
+                                        '',
+                                        'i'
+                                    ),
+                                    '\s+\|\s+Art\.co\.za$',
+                                    '',
+                                    'i'
+                                )
+                            )
+                        ELSE btrim(me.venue_name)
+                    END
+                ),
+                '\s+',
+                ' ',
+                'g'
+            )
+        ), ''), ''), '\s+', ' ', 'g')) AS n_gallery_name,
         lower(regexp_replace(COALESCE(NULLIF(btrim(me.city), ''), 'unknown-city'), '\s+', ' ', 'g')) AS n_city,
         lower(regexp_replace(COALESCE(NULLIF(btrim(me.country), ''), 'unknown-country'), '\s+', ' ', 'g')) AS n_country
     FROM analytics.mart_events me
@@ -205,7 +284,8 @@ inferred AS (
             || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 17, 4)
             || '-' || substr(md5(me.n_gallery_name || '|' || me.n_city || '|' || me.n_country || '|' || me.n_source_domain), 21, 12)
         )::uuid AS gallery_id,
-        MIN(me.venue_name) AS gallery_name,
+        MIN(NULLIF(btrim(me.cleaned_gallery_name), '')) AS gallery_name,
+        MIN(me.original_gallery_name) AS original_gallery_name,
         me.n_gallery_name AS normalized_gallery_name,
         MIN(NULLIF(btrim(me.venue_address), '')) AS gallery_address,
         MIN(NULLIF(btrim(me.city), '')) AS city,
@@ -222,7 +302,15 @@ inferred AS (
         '[]'::jsonb AS linked_artists,
         '[]'::jsonb AS linked_artworks,
         0::int AS quality_score,
-        ARRAY[]::text[] AS quality_flags,
+        array_remove(array[
+            case
+                when bool_or(
+                    me.original_gallery_name ilike '%Art.co.za Art Exhibition Listings%'
+                    or me.original_gallery_name ilike '%Art.co.za Art Gallery Listings%'
+                    or me.original_gallery_name like '% | %'
+                ) then 'noisy_inferred_name'
+            end
+        ], null)::text[] AS quality_flags,
         COALESCE(NULLIF(btrim(MIN(me.venue_address)), ''), '') = '' AS missing_address,
         COALESCE(NULLIF(btrim(MIN(me.city)), ''), '') = '' AS missing_city,
         COALESCE(NULLIF(btrim(MIN(me.country)), ''), '') = '' AS missing_country,
@@ -244,6 +332,7 @@ unioned AS (
 SELECT
     u.gallery_id,
     u.gallery_name,
+    u.original_gallery_name,
     u.normalized_gallery_name,
     u.gallery_address,
     u.city,

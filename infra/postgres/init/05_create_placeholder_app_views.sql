@@ -104,6 +104,7 @@ CREATE OR REPLACE VIEW app.gallery_records AS
 SELECT
     NULL::UUID AS gallery_id,
     NULL::TEXT AS gallery_name,
+    NULL::TEXT AS original_gallery_name,
     NULL::TEXT AS normalized_gallery_name,
     NULL::TEXT AS gallery_address,
     NULL::TEXT AS city,
