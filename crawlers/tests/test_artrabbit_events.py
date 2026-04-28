@@ -206,3 +206,77 @@ def test_footer_social_links_are_ignored() -> None:
 
     assert gallery["instagram_url"] == "https://www.instagram.com/examplegallery/"
     assert gallery["facebook_url"] == "https://www.facebook.com/examplegallery/"
+
+
+def test_duplicate_pagination_url_not_followed_twice() -> None:
+    spider = ArtRabbitEventsSpider(max_pages=5, max_records=10)
+    response = _html_response(
+        "https://www.artrabbit.com/all-listings/united-kingdom/london",
+        """
+        <html><body>
+          <a href="/events/event-1">Event 1</a>
+          <a rel="next" href="/all-listings/united-kingdom/london?page=2">Next</a>
+        </body></html>
+        """,
+    )
+
+    requests = [item for item in spider.parse(response) if hasattr(item, "url")]
+    listing_requests = [request for request in requests if "all-listings" in request.url]
+
+    assert len(listing_requests) == 1
+    assert listing_requests[0].url.endswith("page=2")
+
+
+def test_page_with_only_seen_events_stops_pagination() -> None:
+    spider = ArtRabbitEventsSpider(max_pages=5, max_records=10)
+    spider._seen_event_urls.add("https://www.artrabbit.com/events/seen-event")
+    response = _html_response(
+        "https://www.artrabbit.com/all-listings/united-kingdom/london?page=2",
+        """
+        <html><body>
+          <a href="/events/seen-event">Seen Event</a>
+          <a rel="next" href="/all-listings/united-kingdom/london?page=3">Next</a>
+        </body></html>
+        """,
+    )
+
+    requests = [item for item in spider.parse(response) if hasattr(item, "url")]
+
+    assert requests == []
+
+
+def test_max_pages_respected() -> None:
+    spider = ArtRabbitEventsSpider(max_pages=2, max_records=10)
+    response = _html_response(
+        "https://www.artrabbit.com/all-listings/united-kingdom/london?page=2",
+        """
+        <html><body>
+          <a href="/events/new-event">New Event</a>
+          <a rel="next" href="/all-listings/united-kingdom/london?page=3">Next</a>
+        </body></html>
+        """,
+    )
+
+    requests = [item for item in spider.parse(response) if hasattr(item, "url")]
+    listing_requests = [request for request in requests if "all-listings" in request.url]
+
+    assert len(listing_requests) == 0
+
+
+def test_rel_next_loop_does_not_recurse_forever() -> None:
+    spider = ArtRabbitEventsSpider(max_pages=10, max_records=10)
+    response = _html_response(
+        "https://www.artrabbit.com/all-listings/united-kingdom/london?page=2",
+        """
+        <html><body>
+          <a href="/events/new-event">New Event</a>
+          <a rel="next" href="/all-listings/united-kingdom/london?page=2">Loop</a>
+        </body></html>
+        """,
+    )
+
+    requests = [item for item in spider.parse(response) if hasattr(item, "url")]
+    listing_requests = [request for request in requests if "all-listings" in request.url]
+
+    assert len(listing_requests) == 1
+    assert listing_requests[0].url.endswith("page=3")
