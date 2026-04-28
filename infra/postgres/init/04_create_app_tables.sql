@@ -107,3 +107,36 @@ CREATE TABLE IF NOT EXISTS app.event_moderation_overrides (
     moderator_notes TEXT,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS app.event_moderation_corrections (
+    correction_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    event_id UUID NOT NULL,
+    field_name TEXT NOT NULL,
+    original_value TEXT,
+    suggested_value TEXT,
+    final_value TEXT,
+    suggestion_confidence NUMERIC(5,4),
+    suggestion_reason TEXT,
+    action TEXT NOT NULL,
+    source_domain TEXT,
+    event_title TEXT,
+    event_type TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by TEXT
+);
+
+CREATE TABLE IF NOT EXISTS app.event_learned_rules (
+    rule_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    field_name TEXT NOT NULL,
+    pattern TEXT NOT NULL,
+    suggested_value TEXT NOT NULL,
+    confidence NUMERIC(5,4) NOT NULL DEFAULT 0.5,
+    support_count INTEGER NOT NULL DEFAULT 1,
+    accepted_count INTEGER NOT NULL DEFAULT 0,
+    rejected_count INTEGER NOT NULL DEFAULT 0,
+    source_domain TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT true,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (field_name, pattern, suggested_value, source_domain)
+);

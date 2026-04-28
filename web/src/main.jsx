@@ -127,6 +127,13 @@ function getAdminModerationMetrics() {
   return api('/api/admin/moderation/metrics')
 }
 
+function autoApplyEventSuggestions(payload) {
+  return api('/api/admin/events/auto-apply-suggestions', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
 function eventModerationStatusLabel(event) {
   return event.is_hidden ? 'Hidden' : event.is_approved ? 'Approved' : event.moderation_override_exists ? 'Reviewed' : 'Unmoderated'
 }
@@ -765,6 +772,7 @@ function AdminEventsPage() {
   const [saveError, setSaveError] = React.useState('')
   const [selectedEventIds, setSelectedEventIds] = React.useState(new Set())
   const [bulkEventType, setBulkEventType] = React.useState('')
+  const [autoApplyPreview, setAutoApplyPreview] = React.useState(null)
   const [activeIndex, setActiveIndex] = React.useState(0)
   const [showShortcutHelp, setShowShortcutHelp] = React.useState(false)
   const searchInputRef = React.useRef(null)
@@ -893,6 +901,23 @@ function AdminEventsPage() {
     }
   }
 
+  async function runAutoApply(dryRun) {
+    try {
+      setSaving(true)
+      setSaveError('')
+      const result = await autoApplyEventSuggestions({ dry_run: dryRun, limit: 500, queue: filters.queue })
+      setAutoApplyPreview(result)
+      if (!dryRun) {
+        const refreshed = await getAdminEvents(filters)
+        setEvents(Array.isArray(refreshed) ? refreshed : [])
+      }
+    } catch (err) {
+      setSaveError(`Auto-apply failed: ${err.message}`)
+    } finally {
+      setSaving(false)
+    }
+  }
+
   React.useEffect(() => {
     function isTypingTarget(target) {
       if (!target) return false
@@ -1011,6 +1036,19 @@ function AdminEventsPage() {
       {loading && <p>Loading events…</p>}
       {error && <p className="error-text">Failed to load events: {error}</p>}
       {saveError && <p className="error-text">{saveError}</p>}
+      {autoApplyPreview && (
+        <div className="auto-apply-panel">
+          <strong>Auto-apply result</strong>
+          <div>Eligible: {autoApplyPreview.eligible} · Would update: {autoApplyPreview.would_update} · Updated: {autoApplyPreview.updated}</div>
+          {Array.isArray(autoApplyPreview.examples) && autoApplyPreview.examples.length > 0 && (
+            <ul>
+              {autoApplyPreview.examples.slice(0, 5).map((item) => (
+                <li key={item.event_id}>{item.event_title || item.event_id}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
       <p className="help-text">Keyboard shortcuts: ? for help.</p>
       {!loading && !error && (
         <table>
@@ -1038,6 +1076,8 @@ function AdminEventsPage() {
                     <button disabled={saving} onClick={() => runBulkUpdate({ is_hidden: false })}>Unhide selected</button>
                     <button disabled={saving} onClick={() => runBulkUpdate({ is_approved: false })}>Mark unapproved</button>
                     <button disabled={saving} onClick={applyVisibleSuggestions}>Apply visible suggestions</button>
+                    <button disabled={saving} onClick={() => runAutoApply(true)}>Dry run auto-apply</button>
+                    <button disabled={saving} onClick={() => runAutoApply(false)}>Apply high-confidence suggestions</button>
                     <select value={bulkEventType} onChange={(e) => setBulkEventType(e.target.value)} disabled={saving}>
                       <option value="">Set event type…</option>
                       {availableEventTypes.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -1069,6 +1109,9 @@ function AdminEventsPage() {
                 <td>{event.crawl_timestamp || '—'}</td>
                 <td>
                   {eventModerationStatusLabel(event)}
+                  {String(event.moderation_reason || '').startsWith('auto_applied') && (
+                    <div><small className="auto-badge">auto-applied</small></div>
+                  )}
                   <div className="quality-meta">
                     <span className="quality-badge">{event.quality_score}/5</span>
                     {Array.isArray(event.quality_flags) && event.quality_flags.length > 0 && (
@@ -1120,8 +1163,25 @@ function AdminEventsPage() {
                       />
                     </div>
                     {(event.suggested_event_type || event.suggested_event_title) && (
-                      <button disabled={saving} onClick={() => applySuggestion(event)}>
-                        Apply suggestion
+                      <>
+                        <small>
+                          {event.suggested_event_type ? `Suggested: ${event.suggested_event_type} · ${Math.round((event.event_type_confidence || 0) * 100)}%` : ''}
+                          {event.suggested_event_title ? ` ${event.suggested_event_title} · ${Math.round((event.event_title_confidence || 0) * 100)}%` : ''}
+                        </small>
+                        <small>{event.event_type_suggestion_reason || event.event_title_suggestion_reason || event.suggestion_reason}</small>
+                        <button disabled={saving} onClick={() => applySuggestion(event)}>
+                          Apply suggestion
+                        </button>
+                      </>
+                    )}
+                    {String(event.moderation_reason || '').startsWith('auto_applied') && (
+                      <button disabled={saving} onClick={() => saveSingleEvent(event.event_id, {
+                        canonical_event_title: '',
+                        event_type: '',
+                        moderation_reason: 'reverted auto_applied suggestion',
+                      })}
+                      >
+                        Undo auto-apply
                       </button>
                     )}
                   </div>
