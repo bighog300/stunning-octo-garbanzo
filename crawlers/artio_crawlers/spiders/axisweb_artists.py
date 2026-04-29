@@ -227,21 +227,19 @@ class AxiswebArtistsSpider(scrapy.Spider):
             links_found += 1
             letter_group = self._nearest_letter_group(anchor)
 
-            item = ArtistItem()
-            item["crawl_run_id"] = self.crawl_run_id
-            item["source_domain"] = "axisweb.org"
-            item["source_url"] = source_url
-            item["source_record_id"] = source_record_id
-            item["artist_name"] = artist_name
-            item["raw_payload"] = {
-                "source": "directory-of-artists",
-                "letter_group": letter_group,
-                "href": href,
-                "text": artist_name,
-                "membership_id": membership_id,
-            }
-            item["content_hash"] = content_hash(source_url, artist_name, source_record_id)
-            item["crawl_timestamp"] = datetime.now(UTC).isoformat()
+            item = self._build_artist_item(
+                source_url=source_url,
+                source_record_id=source_record_id,
+                artist_name=artist_name,
+                raw_payload={
+                    "source": "directory-of-artists",
+                    "letter_group": letter_group,
+                    "href": href,
+                    "text": artist_name,
+                    "membership_id": membership_id,
+                },
+                content_hash_value=content_hash(source_url, artist_name, source_record_id),
+            )
             self.records_emitted += 1
             self._inc_stat("axisweb/artists_scraped")
             yield item
@@ -377,21 +375,39 @@ class AxiswebArtistsSpider(scrapy.Spider):
             self._clean((hit.get("address") or {}).get("city") if isinstance(hit.get("address"), dict) else None),
         )
 
-        item = ArtistItem()
-        item["crawl_run_id"] = self.crawl_run_id
-        item["source_domain"] = "axisweb.org"
-        item["source_url"] = profile_url
-        item["source_record_id"] = source_id
-        item["artist_name"] = name
+        item = self._build_artist_item(
+            source_url=profile_url,
+            source_record_id=source_id,
+            artist_name=name,
+            raw_payload=hit,
+            content_hash_value=content_hash(profile_url, name, city, source_id),
+        )
         item["birth_year_text"] = None
         item["death_year_text"] = None
         item["nationality_text"] = None
         item["biography"] = self._clean(hit.get("biography") or hit.get("description") or hit.get("artist_statement"))
         item["image_url"] = self._canonicalize_url(hit.get("image") or hit.get("image_url") or "") or None
-        item["raw_payload"] = hit
-        item["content_hash"] = content_hash(profile_url, name, city, source_id)
-        item["crawl_timestamp"] = datetime.now(UTC).isoformat()
         return item
+
+    def _build_artist_item(
+        self,
+        *,
+        source_url: str,
+        source_record_id: str,
+        artist_name: str | None,
+        raw_payload: dict,
+        content_hash_value: str,
+    ) -> ArtistItem:
+        return ArtistItem(
+            crawl_run_id=self.crawl_run_id,
+            source_domain="axisweb.org",
+            source_url=source_url,
+            source_record_id=source_record_id,
+            artist_name=artist_name,
+            raw_payload=raw_payload,
+            content_hash=content_hash_value,
+            crawl_timestamp=datetime.now(UTC).isoformat(),
+        )
 
     def _extract_hit_url(self, hit: dict) -> str | None:
         candidates = [
