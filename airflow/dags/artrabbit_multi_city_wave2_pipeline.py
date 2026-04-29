@@ -68,9 +68,10 @@ def create_crawl_run(**context):
 
 
 def validate_raw_ingestion(**context):
-    execution_date = context.get("execution_date")
-    if execution_date is None:
-        raise ValueError("execution_date is required for Wave 2 ingestion validation")
+    logical_date = context.get("logical_date") or context.get("execution_date")
+    if logical_date is None:
+        raise ValueError("logical_date or execution_date is required for Wave 2 ingestion validation")
+    logical_date_param = logical_date.isoformat() if hasattr(logical_date, "isoformat") else str(logical_date)
 
     configured_cities = [c["city"].lower() for c in CITY_CONFIGS]
 
@@ -84,7 +85,7 @@ def validate_raw_ingestion(**context):
                   and crawl_timestamp >= %s
                   and lower(city) = any(%s)
                 """,
-                (SOURCE_DOMAIN, execution_date, configured_cities),
+                (SOURCE_DOMAIN, logical_date_param, configured_cities),
             )
             strict_total_events = cur.fetchone()[0]
 
@@ -120,7 +121,7 @@ def validate_raw_ingestion(**context):
 
     LOGGER.info(
         "ArtRabbit wave2 raw ingestion diagnostics: execution_date=%s strict_total_events=%s recent_total_events=%s total_events=%s cities_with_records=%s/%s city_counts=%s",
-        execution_date,
+        logical_date_param,
         strict_total_events,
         recent_total_events,
         total_events,
