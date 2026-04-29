@@ -136,3 +136,44 @@ def test_directory_fallback_accepts_profile_like_links_and_increments_stats():
     assert len(outputs) == 2
     assert all(item["artist_name"] for item in outputs)
     assert all(item["raw_payload"]["source"] == "directory-of-artists" for item in outputs)
+
+
+def test_directory_fallback_accepts_membership_redirect_links_and_extracts_ids():
+    spider = AxiswebArtistsSpider(max_records=10)
+    html = """
+    <main>
+      <a href="https://axisweb.org/membership/redirect?id=208">Artist Name</a>
+      <a href="/membership/redirect?id=832">Another Artist</a>
+      <a href="/membership/redirect?id=bad">Bad Id</a>
+      <a href="/membership/redirect?id=999">   </a>
+    </main>
+    """
+    response = _html_response(spider.DIRECTORY_URL, html)
+
+    outputs = list(spider.parse_directory(response))
+
+    assert len(outputs) == 2
+    assert outputs[0]["source_record_id"] == "membership-208"
+    assert outputs[1]["source_record_id"] == "membership-832"
+    assert outputs[0]["source_url"] == "https://axisweb.org/membership/redirect?id=208"
+    assert outputs[1]["source_url"] == "https://axisweb.org/membership/redirect?id=832"
+    assert outputs[0]["artist_name"] == "Artist Name"
+    assert outputs[1]["artist_name"] == "Another Artist"
+    assert outputs[0]["raw_payload"]["href"] == "https://axisweb.org/membership/redirect?id=208"
+    assert outputs[0]["raw_payload"]["text"] == "Artist Name"
+    assert outputs[0]["raw_payload"]["membership_id"] == "208"
+    assert outputs[1]["raw_payload"]["membership_id"] == "832"
+
+
+def test_directory_fallback_membership_links_respect_max_records():
+    spider = AxiswebArtistsSpider(max_records=1)
+    html = """
+    <a href="/membership/redirect?id=208">Artist Name</a>
+    <a href="/membership/redirect?id=832">Another Artist</a>
+    """
+    response = _html_response(spider.DIRECTORY_URL, html)
+
+    outputs = list(spider.parse_directory(response))
+
+    assert len(outputs) == 1
+    assert outputs[0]["source_record_id"] == "membership-208"

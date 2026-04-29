@@ -213,15 +213,19 @@ class AxiswebArtistsSpider(scrapy.Spider):
             source_url = self._canonicalize_url(response.urljoin(href))
             if source_url in seen:
                 continue
-            seen.add(source_url)
-            links_found += 1
             artist_name = self._clean(" ".join(anchor.css("::text").getall()))
             if not artist_name:
-                artist_name = self._slug_to_name(urlparse(source_url).path.rstrip("/").split("/")[-1])
-            if not artist_name:
                 continue
+            parsed_source = urlparse(source_url)
+            membership_id = self._extract_membership_id(parsed_source)
+            source_record_id = (
+                f"membership-{membership_id}"
+                if membership_id
+                else (parsed_source.path.rstrip("/").split("/")[-1] or content_hash(source_url))
+            )
+            seen.add(source_url)
+            links_found += 1
             letter_group = self._nearest_letter_group(anchor)
-            source_record_id = urlparse(source_url).path.rstrip("/").split("/")[-1] or content_hash(source_url)
 
             item = ArtistItem()
             item["crawl_run_id"] = self.crawl_run_id
@@ -233,7 +237,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
                 "source": "directory-of-artists",
                 "letter_group": letter_group,
                 "href": href,
-                "name": artist_name,
+                "text": artist_name,
+                "membership_id": membership_id,
             }
             item["content_hash"] = content_hash(source_url, artist_name, source_record_id)
             item["crawl_timestamp"] = datetime.now(UTC).isoformat()
@@ -322,7 +327,17 @@ class AxiswebArtistsSpider(scrapy.Spider):
         path = (parsed.path or "").lower()
         if not path or path in {"/", "/directory-of-artists"}:
             return False
+        membership_id = self._extract_membership_id(parsed)
+        if membership_id:
+            return True
         return bool(re.search(r"^/(p|artist|artists)/[^/]+/?$", path))
+
+    def _extract_membership_id(self, parsed_url) -> str | None:
+        if (parsed_url.path or "").lower() != "/membership/redirect":
+            return None
+        query_values = dict(parse_qsl(parsed_url.query or "", keep_blank_values=True))
+        membership_id = self._clean(query_values.get("id"))
+        return membership_id if membership_id and membership_id.isdigit() else None
 
     def _extract_index_names(self, text: str) -> list[str]:
         patterns = [
