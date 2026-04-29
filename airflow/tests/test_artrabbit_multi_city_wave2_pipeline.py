@@ -18,7 +18,7 @@ EXPECTED_CITY_CONFIGS = {
     "dundee": {"country": "united-kingdom", "max_pages": 8, "max_records": 250},
     "aberdeen": {"country": "united-kingdom", "max_pages": 8, "max_records": 250},
 }
-EXPECTED_DBT_SELECTION = "stg_events mart_events stg_galleries int_gallery_normalized mart_galleries"
+EXPECTED_DBT_SELECTION = "stg_events stg_galleries int_gallery_normalized int_artist_normalized stg_event_artist_candidates int_event_artist_matches mart_event_artists mart_events mart_galleries"
 
 
 def _dag():

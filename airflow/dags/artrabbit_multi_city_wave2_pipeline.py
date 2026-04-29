@@ -210,7 +210,7 @@ with DAG(
 
     dbt_run = BashOperator(
         task_id="dbt_run",
-        bash_command="cd /opt/artio/dbt && dbt run --profiles-dir /opt/artio/dbt --select stg_events mart_events stg_galleries int_gallery_normalized mart_galleries",
+        bash_command="cd /opt/artio/dbt && dbt run --profiles-dir /opt/artio/dbt --select stg_events stg_galleries int_gallery_normalized int_artist_normalized stg_event_artist_candidates int_event_artist_matches mart_event_artists mart_events mart_galleries",
     )
 
     dbt_test = BashOperator(
