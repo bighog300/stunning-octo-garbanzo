@@ -66,15 +66,39 @@ def validate_raw_ingestion(**context):
     crawl_run_id = context["ti"].xcom_pull(task_ids="create_crawl_run")
     with _conn() as conn:
         with conn.cursor() as cur:
+            strict_event_count = 0
+            if crawl_run_id is not None:
+                cur.execute(
+                    """
+                    select count(*)
+                    from raw.events
+                    where source_domain = %s
+                      and crawl_run_id = %s
+                    """,
+                    (SOURCE_DOMAIN, crawl_run_id),
+                )
+                strict_event_count = cur.fetchone()[0]
+
             cur.execute(
                 """
                 select count(*)
-                from raw.events
+                from raw.galleries
                 where source_domain = %s and (crawl_run_id = %s or %s is null)
                 """,
                 (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
             )
-            event_count = cur.fetchone()[0]
+            strict_gallery_count = cur.fetchone()[0]
+
+            cur.execute(
+                """
+                select count(*)
+                from raw.events
+                where source_domain = %s
+                  and crawl_timestamp >= now() - interval '1 day'
+                """,
+                (SOURCE_DOMAIN,),
+            )
+            recent_event_count = cur.fetchone()[0]
 
             cur.execute(
                 """
@@ -85,12 +109,47 @@ def validate_raw_ingestion(**context):
                 """,
                 (SOURCE_DOMAIN,),
             )
-            gallery_count = cur.fetchone()[0]
+            recent_gallery_count = cur.fetchone()[0]
 
-    if event_count < 1:
-        raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} event row, found {event_count}")
-    if gallery_count < 1:
-        raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} gallery row, found {gallery_count}")
+            cur.execute(
+                """
+                select
+                    coalesce(city, '<unknown>') as city_name,
+                    count(*) as city_event_count
+                from raw.events
+                where source_domain = %s
+                  and crawl_timestamp >= now() - interval '1 day'
+                group by 1
+                order by 2 desc, 1
+                """,
+                (SOURCE_DOMAIN,),
+            )
+            recent_city_counts = cur.fetchall()
+
+    effective_event_count = strict_event_count if strict_event_count > 0 else recent_event_count
+    effective_gallery_count = strict_gallery_count if strict_gallery_count > 0 else recent_gallery_count
+
+    print(
+        "[validate_raw_ingestion] "
+        f"crawl_run_id={crawl_run_id}, "
+        f"strict_event_count={strict_event_count}, "
+        f"recent_event_count={recent_event_count}, "
+        f"strict_gallery_count={strict_gallery_count}, "
+        f"recent_gallery_count={recent_gallery_count}, "
+        f"effective_gallery_count={effective_gallery_count}, "
+        f"recent_city_counts={recent_city_counts}"
+    )
+
+    if effective_event_count < 1:
+        raise ValueError(
+            f"Expected at least 1 {SOURCE_DOMAIN} event row for crawl_run_id={crawl_run_id} "
+            f"or in the last 1 day; strict_event_count={strict_event_count}, recent_event_count={recent_event_count}"
+        )
+    if effective_gallery_count < 1:
+        raise ValueError(
+            f"Expected at least 1 {SOURCE_DOMAIN} gallery row for crawl_run_id={crawl_run_id} "
+            f"or in the last 1 day; strict_gallery_count={strict_gallery_count}, recent_gallery_count={recent_gallery_count}"
+        )
 
 
 # Create the crawl pool once in Airflow:

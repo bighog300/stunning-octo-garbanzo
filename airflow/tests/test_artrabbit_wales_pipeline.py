@@ -101,3 +101,121 @@ def test_apply_superset_views_task_exists():
     dag = _dag()
 
     assert dag.get_task("apply_superset_views") is not None
+
+
+def test_validate_raw_ingestion_passes_with_strict_crawl_run_match(monkeypatch):
+    from airflow.dags import artrabbit_wales_pipeline as pipeline
+
+    class FakeCursor:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+
+        def fetchone(self):
+            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
+            values = [3, 1, 5, 2]
+            return (values[self.calls - 1],)
+
+        def fetchall(self):
+            return [("cardiff", 3), ("swansea", 2)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
+    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-123"})()
+    pipeline.validate_raw_ingestion(ti=ti)
+
+
+def test_validate_raw_ingestion_passes_with_recent_fallback(monkeypatch):
+    from airflow.dags import artrabbit_wales_pipeline as pipeline
+
+    class FakeCursor:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+
+        def fetchone(self):
+            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
+            values = [0, 0, 4, 1]
+            return (values[self.calls - 1],)
+
+        def fetchall(self):
+            return [("cardiff", 2), ("newport", 2)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
+    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-456"})()
+    pipeline.validate_raw_ingestion(ti=ti)
+
+
+def test_validate_raw_ingestion_fails_when_strict_and_recent_empty(monkeypatch):
+    from airflow.dags import artrabbit_wales_pipeline as pipeline
+
+    class FakeCursor:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, query, params):
+            self.calls += 1
+
+        def fetchone(self):
+            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
+            values = [0, 0, 0, 0]
+            return (values[self.calls - 1],)
+
+        def fetchall(self):
+            return []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
+    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-789"})()
+    with pytest.raises(ValueError, match="Expected at least 1 artrabbit.com event row"):
+        pipeline.validate_raw_ingestion(ti=ti)
