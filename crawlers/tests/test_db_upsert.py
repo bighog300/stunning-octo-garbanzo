@@ -1,9 +1,10 @@
-from artio_crawlers.db import upsert_artwork, upsert_event
+from artio_crawlers.db import upsert_artist, upsert_artwork, upsert_event
 
 
 class _CursorCtx:
     def __init__(self) -> None:
         self.execute_calls: list[tuple[str, dict]] = []
+        self._fetchall_result = []
 
     def __enter__(self):
         return self
@@ -11,11 +12,23 @@ class _CursorCtx:
     def __exit__(self, exc_type, exc, tb):
         return False
 
-    def execute(self, query, params) -> None:
+    def execute(self, query, params=None) -> None:
+        if "information_schema.columns" in query:
+            self._fetchall_result = [
+                ("source_domain",),
+                ("source_url",),
+                ("source_record_id",),
+                ("artist_name",),
+                ("raw_payload",),
+                ("crawl_timestamp",),
+            ]
         self.execute_calls.append((query, params))
 
     def fetchone(self):
         return ["00000000-0000-0000-0000-000000000001"]
+
+    def fetchall(self):
+        return self._fetchall_result
 
 
 class _ConnStub:
@@ -125,3 +138,22 @@ def test_upsert_event_falls_back_to_source_url_conflict_target_when_record_id_mi
     assert conn.commit_calls == 1
     query, _ = conn.cursor_ctx.execute_calls[0]
     assert "ON CONFLICT (source_domain, source_url) WHERE source_record_id IS NULL" in query
+
+
+def test_upsert_artist_sql_does_not_require_source_name_column() -> None:
+    conn = _ConnStub()
+    item = {
+        "source_domain": "axisweb.org",
+        "source_url": "https://www.axisweb.org/artists/jane-doe/",
+        "source_record_id": "artist-123",
+        "artist_name": "Jane Doe",
+        "raw_payload": {"objectID": "artist-123"},
+        "crawl_timestamp": "2026-01-01T00:00:00+00:00",
+    }
+
+    upsert_artist(conn, item)
+
+    assert conn.commit_calls == 1
+    query, _ = conn.cursor_ctx.execute_calls[-1]
+    assert "source_name" not in query
+    assert "artist_name" in query
