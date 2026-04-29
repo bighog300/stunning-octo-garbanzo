@@ -135,6 +135,7 @@ def test_apply_superset_views_task_exists():
 class _FakeCursor:
     def __init__(self, scripted_results):
         self.scripted_results = list(scripted_results)
+        self.calls = []
 
     def __enter__(self):
         return self
@@ -143,6 +144,7 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=None):
+        self.calls.append((query, params))
         self._last_result = self.scripted_results.pop(0)
 
     def fetchone(self):
@@ -175,27 +177,28 @@ def _build_context():
 def _run_validate(monkeypatch, scripted_results):
     fake_cursor = _FakeCursor(scripted_results)
     monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
-    return pipeline_module.validate_raw_ingestion(**_build_context())
+    result = pipeline_module.validate_raw_ingestion(**_build_context())
+    return result, fake_cursor
 
 
 def test_validate_raw_ingestion_strict_rows_pass(monkeypatch):
-    result = _run_validate(monkeypatch, [(3,), (7,), [("bristol", 4), ("leeds", 3)]])
+    result, _ = _run_validate(monkeypatch, [(3,), (7,), [("bristol", 4), ("leeds", 3)]])
     assert result["total_events"] == 3
 
 
 def test_validate_raw_ingestion_recent_fallback_passes(monkeypatch):
-    result = _run_validate(monkeypatch, [(0,), (5,), [("birmingham", 5)]])
+    result, _ = _run_validate(monkeypatch, [(0,), (5,), [("birmingham", 5)]])
     assert result["total_events"] == 5
 
 
 def test_validate_raw_ingestion_mixed_city_casing_passes(monkeypatch):
-    result = _run_validate(monkeypatch, [(0,), (2,), [("bristol", 1), ("dundee", 1)]])
+    result, _ = _run_validate(monkeypatch, [(0,), (2,), [("bristol", 1), ("dundee", 1)]])
     assert result["city_counts"]["bristol"] == 1
     assert result["city_counts"]["dundee"] == 1
 
 
 def test_validate_raw_ingestion_newcastle_zero_does_not_fail(monkeypatch):
-    result = _run_validate(monkeypatch, [(0,), (4,), [("cardiff", 4)]])
+    result, _ = _run_validate(monkeypatch, [(0,), (4,), [("cardiff", 4)]])
     assert result["city_counts"]["newcastle"] == 0
     assert result["city_counts"]["cardiff"] == 4
 
@@ -208,3 +211,27 @@ def test_validate_raw_ingestion_fails_when_strict_and_recent_zero(monkeypatch):
 def test_validate_raw_ingestion_fails_when_no_configured_cities_have_records(monkeypatch):
     with pytest.raises(ValueError, match=r"Expected at least 1 configured Wave 2 city with records"):
         _run_validate(monkeypatch, [(2,), (2,), []])
+
+
+def test_validate_raw_ingestion_uses_lower_city_filters_and_matching_params(monkeypatch):
+    _, fake_cursor = _run_validate(monkeypatch, [(1,), (1,), [("bristol", 1)]])
+
+    assert len(fake_cursor.calls) == 3
+
+    strict_query, strict_params = fake_cursor.calls[0]
+    recent_query, recent_params = fake_cursor.calls[1]
+    city_counts_query, city_counts_params = fake_cursor.calls[2]
+
+    assert "lower(city) = any(%s)" in strict_query
+    assert "lower(city) = any(%s)" in recent_query
+    assert "lower(city) = any(%s)" in city_counts_query
+
+    assert strict_params[0] == pipeline_module.SOURCE_DOMAIN
+    assert strict_params[1] == _build_context()["execution_date"]
+    assert strict_params[2] == [cfg["city"] for cfg in pipeline_module.CITY_CONFIGS]
+
+    assert recent_params[0] == pipeline_module.SOURCE_DOMAIN
+    assert recent_params[1] == [cfg["city"] for cfg in pipeline_module.CITY_CONFIGS]
+
+    assert city_counts_params[0] == pipeline_module.SOURCE_DOMAIN
+    assert city_counts_params[1] == [cfg["city"] for cfg in pipeline_module.CITY_CONFIGS]
