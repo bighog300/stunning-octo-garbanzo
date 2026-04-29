@@ -79,15 +79,6 @@ def validate_raw_ingestion(**context):
                 )
                 strict_event_count = cur.fetchone()[0]
 
-            cur.execute(
-                """
-                select count(*)
-                from raw.galleries
-                where source_domain = %s and (crawl_run_id = %s or %s is null)
-                """,
-                (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
-            )
-            strict_gallery_count = cur.fetchone()[0]
 
             cur.execute(
                 """
@@ -127,16 +118,13 @@ def validate_raw_ingestion(**context):
             recent_city_counts = cur.fetchall()
 
     effective_event_count = strict_event_count if strict_event_count > 0 else recent_event_count
-    effective_gallery_count = strict_gallery_count if strict_gallery_count > 0 else recent_gallery_count
 
     print(
         "[validate_raw_ingestion] "
         f"crawl_run_id={crawl_run_id}, "
         f"strict_event_count={strict_event_count}, "
         f"recent_event_count={recent_event_count}, "
-        f"strict_gallery_count={strict_gallery_count}, "
         f"recent_gallery_count={recent_gallery_count}, "
-        f"effective_gallery_count={effective_gallery_count}, "
         f"recent_city_counts={recent_city_counts}"
     )
 
@@ -145,10 +133,10 @@ def validate_raw_ingestion(**context):
             f"Expected at least 1 {SOURCE_DOMAIN} event row for crawl_run_id={crawl_run_id} "
             f"or in the last 1 day; strict_event_count={strict_event_count}, recent_event_count={recent_event_count}"
         )
-    if effective_gallery_count < 1:
+    if recent_gallery_count < 1:
         raise ValueError(
-            f"Expected at least 1 {SOURCE_DOMAIN} gallery row for crawl_run_id={crawl_run_id} "
-            f"or in the last 1 day; strict_gallery_count={strict_gallery_count}, recent_gallery_count={recent_gallery_count}"
+            f"Expected at least 1 recent {SOURCE_DOMAIN} gallery row in the last 1 day; "
+            f"recent_gallery_count={recent_gallery_count}"
         )
 
 
