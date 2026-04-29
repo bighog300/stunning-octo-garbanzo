@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -192,7 +193,7 @@ def test_validate_raw_ingestion_recent_fallback_passes(monkeypatch):
 
 
 def test_validate_raw_ingestion_mixed_city_casing_passes(monkeypatch):
-    result, _ = _run_validate(monkeypatch, [(0,), (2,), [("bristol", 1), ("dundee", 1)]])
+    result, _ = _run_validate(monkeypatch, [(0,), (2,), [("BRISTOL".lower(), 1), ("DUNDEE".lower(), 1)]])
     assert result["city_counts"]["bristol"] == 1
     assert result["city_counts"]["dundee"] == 1
 
@@ -235,3 +236,12 @@ def test_validate_raw_ingestion_uses_lower_city_filters_and_matching_params(monk
 
     assert city_counts_params[0] == pipeline_module.SOURCE_DOMAIN
     assert city_counts_params[1] == [cfg["city"] for cfg in pipeline_module.CITY_CONFIGS]
+
+
+def test_validate_raw_ingestion_has_single_total_events_assignment_and_no_forbidden_patterns():
+    dag_file = Path("/workspace/stunning-octo-garbanzo/airflow/dags/artrabbit_multi_city_wave2_pipeline.py")
+    content = dag_file.read_text()
+
+    assert "total_events = cur.fetchone()[0]" not in content
+    assert "total_events = strict_total_events or recent_total_events" not in content
+    assert content.count("total_events =") == 1
