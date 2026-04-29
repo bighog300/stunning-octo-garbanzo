@@ -113,28 +113,28 @@ def validate_raw_ingestion(**context):
             )
             city_count_rows = cur.fetchall()
 
-    total_events = strict_total_events if strict_total_events > 0 else recent_total_events
+    effective_total_events = strict_total_events if strict_total_events > 0 else recent_total_events
     city_counts = {city: 0 for city in configured_cities}
     city_counts.update({row[0]: row[1] for row in city_count_rows if row[0] in city_counts})
     cities_with_records = [city for city, count in city_counts.items() if count > 0]
 
     LOGGER.info(
-        "ArtRabbit wave2 raw ingestion diagnostics: execution_date=%s strict_total_events=%s recent_total_events=%s total_events=%s cities_with_records=%s/%s city_counts=%s",
+        "ArtRabbit wave2 raw ingestion diagnostics: execution_date=%s strict_total_events=%s recent_total_events=%s effective_total_events=%s cities_with_records=%s/%s city_counts=%s",
         execution_date,
         strict_total_events,
         recent_total_events,
-        total_events,
+        effective_total_events,
         len(cities_with_records),
         len(configured_cities),
         city_counts,
     )
 
-    if total_events == 0:
+    if effective_total_events == 0:
         raise ValueError(f"Expected > 0 new {SOURCE_DOMAIN} event rows, found 0")
     if not cities_with_records:
         raise ValueError(f"Expected at least 1 configured Wave 2 city with records, found none: {city_counts}")
 
-    return {"total_events": total_events, "city_counts": city_counts}
+    return {"total_events": effective_total_events, "city_counts": city_counts}
 
 
 # Create the crawl pool once in Airflow:
