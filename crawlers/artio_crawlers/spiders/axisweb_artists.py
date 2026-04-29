@@ -31,7 +31,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
 
     ALGOLIA_APP_ID = "ZRWKGORU1W"
     ALGOLIA_API_KEY = "167e6b0a7408a25a86ce179218e38749"
-    ALGOLIA_URL = f"https://{ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/*/queries"
+    ALGOLIA_URL = f"https://{ALGOLIA_APP_ID}.algolia.net/1/indexes/*/queries"
     ALGOLIA_INDEX_CANDIDATES = [
         "production_artists",
         "production_artist",
@@ -41,6 +41,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
     ]
 
     TRACKING_QUERY_PREFIXES = ("utm_", "gclid", "fbclid", "mc_", "_hs")
+    handle_httpstatus_list = [400, 403, 404]
 
     def __init__(self, crawl_run_id=None, max_pages=5, max_records=100, full_crawl=False, use_sample_data=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -84,7 +85,11 @@ class AxiswebArtistsSpider(scrapy.Spider):
                 "Content-Type": "application/json",
             },
             callback=self.parse_algolia,
-            meta={"algolia_index": index_name, "algolia_page": page},
+            meta={
+                "algolia_index": index_name,
+                "algolia_page": page,
+                "dont_obey_robotstxt": True,
+            },
             dont_filter=True,
         )
 
@@ -92,7 +97,18 @@ class AxiswebArtistsSpider(scrapy.Spider):
         index_name = response.meta["algolia_index"]
         page = int(response.meta.get("algolia_page", 0))
 
-        payload = response.json() if response.text else {}
+        self._inc_stat(f"axisweb/algolia_status_{response.status}")
+
+        if response.status == 404:
+            self._inc_stat("axisweb/algolia_404")
+            self.logger.warning("Algolia index request returned 404 for index=%s page=%s", index_name, page)
+            return
+
+        try:
+            payload = response.json() if response.text else {}
+        except ValueError:
+            self.logger.warning("Non-JSON Algolia response for index=%s page=%s status=%s", index_name, page, response.status)
+            return
         results = payload.get("results") or []
         result = results[0] if results else {}
         hits = result.get("hits") or []
@@ -242,6 +258,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
         crawler = getattr(self, "crawler", None)
         if crawler and crawler.stats:
             crawler.stats.inc_value(key, count)
+
     def parse_sample(self, response: scrapy.http.Response):
         del response
         for item in self._sample_items():

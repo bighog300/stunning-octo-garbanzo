@@ -34,6 +34,15 @@ def test_parse_sample_yields_artist_items_without_network():
     assert isinstance(item["raw_payload"], dict)
 
 
+def test_live_algolia_url_uses_primary_host_not_dsn():
+    spider = AxiswebArtistsSpider(use_sample_data=False)
+
+    request = spider._algolia_request(index_name="production_artists", page=0)
+
+    assert request.url.startswith("https://zrwkgoru1w.algolia.net/")
+    assert "-dsn.algolia.net" not in request.url
+
+
 def test_algolia_response_parsing_yields_artist_item():
     spider = AxiswebArtistsSpider(max_records=5)
     response = _json_response(
