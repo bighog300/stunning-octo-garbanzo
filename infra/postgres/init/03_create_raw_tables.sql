@@ -86,6 +86,14 @@ CREATE TABLE IF NOT EXISTS raw.artists (
     updated_at TIMESTAMPTZ
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_record_id_key
+    ON raw.artists (source_domain, source_record_id)
+    WHERE source_record_id IS NOT NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_url_null_record_id_key
+    ON raw.artists (source_domain, source_url)
+    WHERE source_record_id IS NULL;
+
 CREATE TABLE IF NOT EXISTS raw.crawl_errors (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     crawl_run_id UUID REFERENCES raw.crawl_runs(id),
