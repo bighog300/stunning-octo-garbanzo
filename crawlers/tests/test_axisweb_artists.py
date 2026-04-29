@@ -1,5 +1,6 @@
 import json
 
+from artio_crawlers.items import ArtistItem
 from artio_crawlers.spiders.axisweb_artists import AxiswebArtistsSpider
 from scrapy.http import Request, TextResponse
 
@@ -27,6 +28,7 @@ def test_parse_sample_yields_artist_items_without_network():
     outputs = list(spider.parse_sample(response))
     assert len(outputs) >= 5
     item = outputs[0]
+    assert isinstance(item, ArtistItem)
     assert item["source_domain"] == "axisweb.org"
     assert item["artist_name"].startswith("Sample Artist")
     assert item["source_url"].startswith("https://axisweb.org/p/")
@@ -100,6 +102,7 @@ def test_directory_of_artists_parsing_yields_artist_items_with_required_fields()
 
     assert len(outputs) == 2
     for item in outputs:
+        assert isinstance(item, ArtistItem)
         assert item["source_domain"] == "axisweb.org"
         assert item["source_url"].startswith("https://")
         assert item["source_record_id"]
@@ -134,6 +137,7 @@ def test_directory_fallback_accepts_profile_like_links_and_increments_stats():
     outputs = list(spider.parse_directory(response))
 
     assert len(outputs) == 2
+    assert all(isinstance(item, ArtistItem) for item in outputs)
     assert all(item["artist_name"] for item in outputs)
     assert all(item["raw_payload"]["source"] == "directory-of-artists" for item in outputs)
 
@@ -153,6 +157,7 @@ def test_directory_fallback_accepts_membership_redirect_links_and_extracts_ids()
     outputs = list(spider.parse_directory(response))
 
     assert len(outputs) == 2
+    assert all(isinstance(item, ArtistItem) for item in outputs)
     assert outputs[0]["source_record_id"] == "membership-208"
     assert outputs[1]["source_record_id"] == "membership-832"
     assert outputs[0]["source_url"] == "https://axisweb.org/membership/redirect?id=208"
@@ -177,3 +182,30 @@ def test_directory_fallback_membership_links_respect_max_records():
 
     assert len(outputs) == 1
     assert outputs[0]["source_record_id"] == "membership-208"
+
+
+def test_algolia_mode_yields_artist_items_not_plain_dicts():
+    spider = AxiswebArtistsSpider(max_records=10)
+    response = _json_response(
+        spider.ALGOLIA_URL,
+        payload={
+            "results": [
+                {
+                    "hits": [
+                        {
+                            "objectID": "artist-1",
+                            "title": "Artist One",
+                            "url": "https://axisweb.org/p/artist-one",
+                        }
+                    ],
+                    "nbPages": 1,
+                }
+            ]
+        },
+        meta={"algolia_index": "production_artists", "algolia_page": 0},
+    )
+
+    outputs = list(spider.parse_algolia(response))
+
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], ArtistItem)
