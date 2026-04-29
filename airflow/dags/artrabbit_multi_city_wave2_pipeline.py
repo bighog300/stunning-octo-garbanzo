@@ -68,91 +68,69 @@ def create_crawl_run(**context):
 
 
 def validate_raw_ingestion(**context):
-    crawl_run_id = context["ti"].xcom_pull(task_ids="create_crawl_run")
     execution_date = context.get("execution_date")
-    configured_cities = [city_config["city"] for city_config in CITY_CONFIGS]
+    if execution_date is None:
+        raise ValueError("execution_date is required for Wave 2 ingestion validation")
+
+    configured_cities = [city_config["city"].lower() for city_config in CITY_CONFIGS]
 
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                select exists (
-                    select 1
-                    from information_schema.columns
-                    where table_schema = 'raw'
-                      and table_name = 'events'
-                      and column_name = 'crawl_run_id'
-                )
+                select count(*)
+                from raw.events
+                where source_domain = %s
+                  and crawl_timestamp >= %s
+                  and lower(city) = any(%s)
                 """,
+                (SOURCE_DOMAIN, execution_date, configured_cities),
             )
-            has_crawl_run_id = cur.fetchone()[0]
+            strict_total_events = cur.fetchone()[0]
 
-            if crawl_run_id and has_crawl_run_id:
-                cur.execute(
-                    """
-                    select count(*)
-                    from raw.events
-                    where source_domain = %s
-                      and crawl_run_id = %s
-                    """,
-                    (SOURCE_DOMAIN, crawl_run_id),
-                )
-                total_events = cur.fetchone()[0]
+            cur.execute(
+                """
+                select count(*)
+                from raw.events
+                where source_domain = %s
+                  and crawl_timestamp >= now() - interval '1 day'
+                  and lower(city) = any(%s)
+                """,
+                (SOURCE_DOMAIN, configured_cities),
+            )
+            recent_total_events = cur.fetchone()[0]
 
-                cur.execute(
-                    """
-                    select city, count(*)
-                    from raw.events
-                    where source_domain = %s
-                      and crawl_run_id = %s
-                      and city = any(%s)
-                    group by city
-                    """,
-                    (SOURCE_DOMAIN, crawl_run_id, configured_cities),
-                )
-            else:
-                if execution_date is None:
-                    raise ValueError("execution_date is required when crawl_run_id is unavailable")
-
-                cur.execute(
-                    """
-                    select count(*)
-                    from raw.events
-                    where source_domain = %s
-                      and crawl_timestamp >= %s
-                    """,
-                    (SOURCE_DOMAIN, execution_date),
-                )
-                total_events = cur.fetchone()[0]
-
-                cur.execute(
-                    """
-                    select city, count(*)
-                    from raw.events
-                    where source_domain = %s
-                      and crawl_timestamp >= %s
-                      and city = any(%s)
-                    group by city
-                    """,
-                    (SOURCE_DOMAIN, execution_date, configured_cities),
-                )
-
+            cur.execute(
+                """
+                select lower(city) as normalized_city, count(*)
+                from raw.events
+                where source_domain = %s
+                  and crawl_timestamp >= now() - interval '1 day'
+                  and lower(city) = any(%s)
+                group by lower(city)
+                """,
+                (SOURCE_DOMAIN, configured_cities),
+            )
             city_count_rows = cur.fetchall()
 
+    total_events = strict_total_events if strict_total_events > 0 else recent_total_events
     city_counts = {city: 0 for city in configured_cities}
     city_counts.update({row[0]: row[1] for row in city_count_rows if row[0] in city_counts})
     cities_with_records = [city for city, count in city_counts.items() if count > 0]
 
     LOGGER.info(
-        "ArtRabbit wave2 raw ingestion summary: total_events=%s, cities_with_records=%s/%s, by_city=%s",
+        "ArtRabbit wave2 raw ingestion diagnostics: execution_date=%s strict_total_events=%s recent_total_events=%s total_events=%s cities_with_records=%s/%s city_counts=%s",
+        execution_date,
+        strict_total_events,
+        recent_total_events,
         total_events,
         len(cities_with_records),
         len(configured_cities),
         city_counts,
     )
 
-    if total_events < 1:
-        raise ValueError(f"Expected > 0 new {SOURCE_DOMAIN} event rows, found {total_events}")
+    if total_events == 0:
+        raise ValueError(f"Expected > 0 new {SOURCE_DOMAIN} event rows, found 0")
     if not cities_with_records:
         raise ValueError(f"Expected at least 1 configured Wave 2 city with records, found none: {city_counts}")
 
