@@ -8,6 +8,54 @@ EXPECTED_CITIES = ["cardiff", "swansea", "newport", "bangor", "wrexham"]
 EXPECTED_DBT_SELECTION = "stg_events mart_events stg_galleries int_gallery_normalized mart_galleries"
 
 
+class _FakeCursor:
+    def __init__(self, counts, city_counts=None):
+        self.counts = list(counts)
+        self.city_counts = city_counts or []
+        self.calls = 0
+        self.executed_queries = []
+
+    def execute(self, query, params):
+        self.calls += 1
+        self.executed_queries.append(query)
+
+    def fetchone(self):
+        return (self.counts[self.calls - 1],)
+
+    def fetchall(self):
+        return self.city_counts
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeConn:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def cursor(self):
+        return self._cursor
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+def _run_validate(monkeypatch, counts, crawl_run_id="run-test", city_counts=None):
+    from airflow.dags import artrabbit_wales_pipeline as pipeline
+
+    fake_cursor = _FakeCursor(counts=counts, city_counts=city_counts)
+    monkeypatch.setattr(pipeline, "_conn", lambda: _FakeConn(fake_cursor))
+    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: crawl_run_id})()
+    pipeline.validate_raw_ingestion(ti=ti)
+    return fake_cursor
+
+
 def _dag():
     dag_bag = DagBag(dag_folder="/workspace/stunning-octo-garbanzo/airflow/dags", include_examples=False)
     assert not dag_bag.import_errors, f"DAG import errors: {dag_bag.import_errors}"
@@ -103,119 +151,44 @@ def test_apply_superset_views_task_exists():
     assert dag.get_task("apply_superset_views") is not None
 
 
-def test_validate_raw_ingestion_passes_with_strict_crawl_run_match(monkeypatch):
+def test_validate_raw_ingestion_passes_with_strict_events_and_recent_galleries(monkeypatch):
+    fake_cursor = _run_validate(
+        monkeypatch,
+        counts=[3, 5, 2],
+        crawl_run_id="run-123",
+        city_counts=[("cardiff", 3), ("swansea", 2)],
+    )
+    gallery_query = fake_cursor.executed_queries[2]
+    assert "from raw.galleries" in gallery_query
+    assert "crawl_run_id" not in gallery_query
+
+
+def test_validate_raw_ingestion_passes_with_recent_event_fallback_and_recent_galleries(monkeypatch):
+    _run_validate(
+        monkeypatch,
+        counts=[0, 4, 1],
+        crawl_run_id="run-456",
+        city_counts=[("cardiff", 2), ("newport", 2)],
+    )
+
+
+def test_validate_raw_ingestion_fails_when_both_event_counts_zero(monkeypatch):
     from airflow.dags import artrabbit_wales_pipeline as pipeline
 
-    class FakeCursor:
-        def __init__(self):
-            self.calls = 0
-
-        def execute(self, query, params):
-            self.calls += 1
-
-        def fetchone(self):
-            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
-            values = [3, 1, 5, 2]
-            return (values[self.calls - 1],)
-
-        def fetchall(self):
-            return [("cardiff", 3), ("swansea", 2)]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeConn:
-        def cursor(self):
-            return FakeCursor()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
-    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-123"})()
-    pipeline.validate_raw_ingestion(ti=ti)
-
-
-def test_validate_raw_ingestion_passes_with_recent_fallback(monkeypatch):
-    from airflow.dags import artrabbit_wales_pipeline as pipeline
-
-    class FakeCursor:
-        def __init__(self):
-            self.calls = 0
-
-        def execute(self, query, params):
-            self.calls += 1
-
-        def fetchone(self):
-            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
-            values = [0, 0, 4, 1]
-            return (values[self.calls - 1],)
-
-        def fetchall(self):
-            return [("cardiff", 2), ("newport", 2)]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeConn:
-        def cursor(self):
-            return FakeCursor()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
-    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-456"})()
-    pipeline.validate_raw_ingestion(ti=ti)
-
-
-def test_validate_raw_ingestion_fails_when_strict_and_recent_empty(monkeypatch):
-    from airflow.dags import artrabbit_wales_pipeline as pipeline
-
-    class FakeCursor:
-        def __init__(self):
-            self.calls = 0
-
-        def execute(self, query, params):
-            self.calls += 1
-
-        def fetchone(self):
-            # strict_event_count, strict_gallery_count, recent_event_count, recent_gallery_count
-            values = [0, 0, 0, 0]
-            return (values[self.calls - 1],)
-
-        def fetchall(self):
-            return []
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    class FakeConn:
-        def cursor(self):
-            return FakeCursor()
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(pipeline, "_conn", lambda: FakeConn())
-    ti = type("TI", (), {"xcom_pull": lambda self, task_ids: "run-789"})()
     with pytest.raises(ValueError, match="Expected at least 1 artrabbit.com event row"):
-        pipeline.validate_raw_ingestion(ti=ti)
+        _run_validate(
+            monkeypatch,
+            counts=[0, 0, 3],
+            crawl_run_id="run-789",
+            city_counts=[],
+        )
+
+
+def test_validate_raw_ingestion_fails_when_recent_gallery_count_zero(monkeypatch):
+    with pytest.raises(ValueError, match="Expected at least 1 recent artrabbit.com gallery row"):
+        _run_validate(
+            monkeypatch,
+            counts=[2, 5, 0],
+            crawl_run_id="run-999",
+            city_counts=[("cardiff", 5)],
+        )
