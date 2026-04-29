@@ -9,11 +9,13 @@ def _json_response(url: str, payload: dict, meta: dict | None = None) -> TextRes
     return TextResponse(url=url, request=request, body=json.dumps(payload).encode("utf-8"), encoding="utf-8")
 
 
+def _html_response(url: str, html: str) -> TextResponse:
+    return TextResponse(url=url, request=Request(url=url), body=html.encode("utf-8"), encoding="utf-8")
+
+
 def test_sample_mode_start_requests_yields_requests_only():
     spider = AxiswebArtistsSpider(use_sample_data=True, max_records=5)
-
     outputs = list(spider.start_requests())
-
     assert len(outputs) == 1
     assert isinstance(outputs[0], Request)
     assert outputs[0].dont_filter is True
@@ -22,9 +24,7 @@ def test_sample_mode_start_requests_yields_requests_only():
 def test_parse_sample_yields_artist_items_without_network():
     spider = AxiswebArtistsSpider(use_sample_data=True, max_records=5)
     response = TextResponse(url="data:text/plain,axisweb-sample", request=Request(url="data:text/plain,axisweb-sample"))
-
     outputs = list(spider.parse_sample(response))
-
     assert len(outputs) >= 5
     item = outputs[0]
     assert item["source_domain"] == "axisweb.org"
@@ -34,81 +34,68 @@ def test_parse_sample_yields_artist_items_without_network():
     assert isinstance(item["raw_payload"], dict)
 
 
-def test_live_algolia_url_uses_primary_host_not_dsn():
+def test_algolia_candidates_are_discovered_from_html_config():
     spider = AxiswebArtistsSpider(use_sample_data=False)
+    html = '<div data-search-app="APP123" data-search-key="KEY123" data-search-prefix="production" data-config="artists,gallery"></div><script>const cfg={indexName:"production_artists_v2"};</script>'
+    response = _html_response(spider.ARTIST_GALLERY_URL, html)
 
-    request = spider._algolia_request(index_name="production_artists", page=0)
+    outputs = list(spider.parse_artist_gallery(response))
 
-    assert request.url.startswith("https://zrwkgoru1w.algolia.net/")
-    assert "-dsn.algolia.net" not in request.url
+    assert outputs
+    assert all(isinstance(r, Request) for r in outputs)
+    urls = [r.url for r in outputs]
+    assert all("algolia.net/1/indexes/*/queries" in url for url in urls)
+    assert all(r.headers.get("X-Algolia-Application-Id") == b"APP123" for r in outputs)
+    bodies = [json.loads(r.body.decode("utf-8")) for r in outputs]
+    index_names = [b["requests"][0]["indexName"] for b in bodies]
+    assert "production_artists_v2" in index_names
+    assert "production_artists" in index_names
 
 
-def test_algolia_response_parsing_yields_artist_item():
-    spider = AxiswebArtistsSpider(max_records=5)
-    response = _json_response(
-        spider.ALGOLIA_URL,
-        {
-            "results": [
-                {
-                    "nbPages": 1,
-                    "hits": [
-                        {
-                            "objectID": "artist-123",
-                            "title": "Jane Doe",
-                            "url": "https://www.axisweb.org/artists/jane-doe/",
-                            "location": "Leeds",
-                        }
-                    ],
-                }
-            ]
-        },
-        meta={"algolia_index": "production_artists", "algolia_page": 0},
+def test_algolia_404_triggers_directory_fallback_request():
+    spider = AxiswebArtistsSpider(max_records=10)
+    spider._algolia_pending = 1
+    response = TextResponse(
+        url=spider.ALGOLIA_URL,
+        request=Request(url=spider.ALGOLIA_URL, meta={"algolia_index": "missing", "algolia_page": 0}),
+        status=404,
+        body=b"",
     )
 
     outputs = list(spider.parse_algolia(response))
 
     assert len(outputs) == 1
-    item = outputs[0]
-    assert item["source_record_id"] == "artist-123"
-    assert item["artist_name"] == "Jane Doe"
-    assert item["raw_payload"]["objectID"] == "artist-123"
+    assert isinstance(outputs[0], Request)
+    assert outputs[0].url == spider.DIRECTORY_URL
 
 
-def test_max_records_is_respected_when_parsing_algolia_hits():
+def test_directory_of_artists_parsing_yields_artist_items_with_required_fields():
+    spider = AxiswebArtistsSpider(max_records=10)
+    html = """
+    <h2>A</h2>
+    <a href="/artists/jane-doe/">Jane Doe</a>
+    <a href="https://axisweb.org/artists/john-smith/">John Smith</a>
+    """
+    response = _html_response(spider.DIRECTORY_URL, html)
+
+    outputs = list(spider.parse_directory(response))
+
+    assert len(outputs) == 2
+    for item in outputs:
+        assert item["source_domain"] == "axisweb.org"
+        assert item["source_url"].startswith("https://")
+        assert item["source_record_id"]
+        assert item["artist_name"]
+        assert isinstance(item["raw_payload"], dict)
+        assert item["raw_payload"]["source"] == "directory-of-artists"
+
+
+def test_max_records_is_respected_for_directory_fallback():
     spider = AxiswebArtistsSpider(max_records=1)
-    response = _json_response(
-        spider.ALGOLIA_URL,
-        {
-            "results": [
-                {
-                    "nbPages": 1,
-                    "hits": [
-                        {"objectID": "artist-1", "name": "One", "url": "https://www.axisweb.org/artists/one/"},
-                        {"objectID": "artist-2", "name": "Two", "url": "https://www.axisweb.org/artists/two/"},
-                    ],
-                }
-            ]
-        },
-        meta={"algolia_index": "production_artists", "algolia_page": 0},
-    )
+    html = '<a href="/artists/one/">One</a><a href="/artists/two/">Two</a>'
+    response = _html_response(spider.DIRECTORY_URL, html)
 
-    outputs = list(spider.parse_algolia(response))
+    outputs = list(spider.parse_directory(response))
 
     assert len(outputs) == 1
-    assert outputs[0]["source_record_id"] == "artist-1"
-
-
-def test_no_static_html_dependency_for_artist_extraction():
-    spider = AxiswebArtistsSpider(max_records=5)
-    response = _json_response(
-        spider.ALGOLIA_URL,
-        {
-            "results": [{"nbPages": 1, "hits": [{"objectID": "artist-9", "slug": "slug-only"}]}]
-        },
-        meta={"algolia_index": "production_artists", "algolia_page": 0},
-    )
-
-    outputs = list(spider.parse_algolia(response))
-
-    assert len(outputs) == 1
-    assert outputs[0]["source_url"] == "https://www.axisweb.org/artists/slug-only/"
+    assert outputs[0]["source_record_id"] == "one"

@@ -31,7 +31,10 @@ class AxiswebArtistsSpider(scrapy.Spider):
 
     ALGOLIA_APP_ID = "ZRWKGORU1W"
     ALGOLIA_API_KEY = "167e6b0a7408a25a86ce179218e38749"
-    ALGOLIA_URL = f"https://{ALGOLIA_APP_ID}.algolia.net/1/indexes/*/queries"
+    ALGOLIA_URL_TEMPLATE = "https://{app_id}.algolia.net/1/indexes/*/queries"
+    ALGOLIA_URL = ALGOLIA_URL_TEMPLATE.format(app_id=ALGOLIA_APP_ID)
+    ARTIST_GALLERY_URL = "https://axisweb.org/artist-gallery"
+    DIRECTORY_URL = "https://axisweb.org/directory-of-artists"
     ALGOLIA_INDEX_CANDIDATES = [
         "production_artists",
         "production_artist",
@@ -52,6 +55,9 @@ class AxiswebArtistsSpider(scrapy.Spider):
         self.use_sample_data = str(use_sample_data).lower() in {"true", "1", "yes"}
         self.records_emitted = 0
         self._algolia_index_used: str | None = None
+        self._algolia_pending = 0
+        self._algolia_hits_found = False
+        self._directory_fallback_started = False
 
     def start_requests(self):
         if self.use_sample_data:
@@ -62,10 +68,26 @@ class AxiswebArtistsSpider(scrapy.Spider):
             )
             return
 
-        for index_name in self.ALGOLIA_INDEX_CANDIDATES:
-            yield self._algolia_request(index_name=index_name, page=0)
+        yield scrapy.Request(self.ARTIST_GALLERY_URL, callback=self.parse_artist_gallery, dont_filter=True)
 
-    def _algolia_request(self, index_name: str, page: int):
+    def parse_artist_gallery(self, response: scrapy.http.Response):
+        discovered = self._discover_search_config(response)
+        app_id = discovered.get("app_id") or self.ALGOLIA_APP_ID
+        api_key = discovered.get("api_key") or self.ALGOLIA_API_KEY
+        index_candidates = self._build_index_candidates(discovered)
+
+        if not index_candidates:
+            self.logger.warning("No Algolia index candidates discovered from artist-gallery page.")
+            yield from self._start_directory_fallback()
+            return
+
+        self._algolia_pending = len(index_candidates)
+        for index_name in index_candidates:
+            yield self._algolia_request(index_name=index_name, page=0, app_id=app_id, api_key=api_key)
+
+    def _algolia_request(self, index_name: str, page: int, app_id: str | None = None, api_key: str | None = None):
+        app_id = app_id or self.ALGOLIA_APP_ID
+        api_key = api_key or self.ALGOLIA_API_KEY
         hits_per_page = min(max(self.max_records, 1), 100)
         request_body = {
             "requests": [
@@ -76,18 +98,20 @@ class AxiswebArtistsSpider(scrapy.Spider):
             ]
         }
         return scrapy.Request(
-            self.ALGOLIA_URL,
+            self.ALGOLIA_URL_TEMPLATE.format(app_id=app_id),
             method="POST",
             body=json.dumps(request_body),
             headers={
-                "X-Algolia-Application-Id": self.ALGOLIA_APP_ID,
-                "X-Algolia-API-Key": self.ALGOLIA_API_KEY,
+                "X-Algolia-Application-Id": app_id,
+                "X-Algolia-API-Key": api_key,
                 "Content-Type": "application/json",
             },
             callback=self.parse_algolia,
             meta={
                 "algolia_index": index_name,
                 "algolia_page": page,
+                "algolia_app_id": app_id,
+                "algolia_api_key": api_key,
                 "dont_obey_robotstxt": True,
             },
             dont_filter=True,
@@ -102,6 +126,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
         if response.status == 404:
             self._inc_stat("axisweb/algolia_404")
             self.logger.warning("Algolia index request returned 404 for index=%s page=%s", index_name, page)
+            if page == 0:
+                yield from self._mark_algolia_candidate_done(index_name)
             return
 
         try:
@@ -117,7 +143,11 @@ class AxiswebArtistsSpider(scrapy.Spider):
             if self._algolia_index_used is None and page == 0:
                 self.logger.info("No hits for candidate index %s", index_name)
             self._inc_stat("axisweb/no_hits")
+            if page == 0:
+                yield from self._mark_algolia_candidate_done(index_name)
             return
+
+        self._algolia_hits_found = True
 
         if self._algolia_index_used is None:
             self._algolia_index_used = index_name
@@ -143,7 +173,123 @@ class AxiswebArtistsSpider(scrapy.Spider):
         next_page = page + 1
         max_pages = total_pages if self.full_crawl else min(total_pages, self.max_pages)
         if next_page < max_pages:
-            yield self._algolia_request(index_name=index_name, page=next_page)
+            yield self._algolia_request(
+                index_name=index_name,
+                page=next_page,
+                app_id=response.meta.get("algolia_app_id"),
+                api_key=response.meta.get("algolia_api_key"),
+            )
+
+    def _mark_algolia_candidate_done(self, index_name: str):
+        del index_name
+        if self._algolia_hits_found or self._directory_fallback_started:
+            return
+        if self._algolia_pending > 0:
+            self._algolia_pending -= 1
+        if self._algolia_pending == 0:
+            self._directory_fallback_started = True
+            return list(self._start_directory_fallback())
+        return []
+
+    def _start_directory_fallback(self):
+        self._inc_stat("axisweb/directory_fallback_used")
+        self.logger.info("Falling back to directory-of-artists crawl for Axisweb live ingestion")
+        yield scrapy.Request(self.DIRECTORY_URL, callback=self.parse_directory, dont_filter=True)
+
+    def parse_directory(self, response: scrapy.http.Response):
+        entries = response.css("a[href*='/artists/'], a[href*='/artist/']")
+        seen: set[str] = set()
+        for anchor in entries:
+            if self._limit_reached():
+                break
+            href = self._clean(anchor.attrib.get("href"))
+            if not href:
+                continue
+            source_url = self._canonicalize_url(response.urljoin(href))
+            if source_url in seen:
+                continue
+            seen.add(source_url)
+            artist_name = self._clean(" ".join(anchor.css("::text").getall()))
+            if not artist_name:
+                artist_name = self._slug_to_name(urlparse(source_url).path.rstrip("/").split("/")[-1])
+            if not artist_name:
+                continue
+            letter_group = self._nearest_letter_group(anchor)
+            source_record_id = urlparse(source_url).path.rstrip("/").split("/")[-1] or content_hash(source_url)
+
+            item = ArtistItem()
+            item["crawl_run_id"] = self.crawl_run_id
+            item["source_domain"] = "axisweb.org"
+            item["source_url"] = source_url
+            item["source_record_id"] = source_record_id
+            item["artist_name"] = artist_name
+            item["raw_payload"] = {
+                "source": "directory-of-artists",
+                "letter_group": letter_group,
+                "href": href,
+                "name": artist_name,
+            }
+            item["content_hash"] = content_hash(source_url, artist_name, source_record_id)
+            item["crawl_timestamp"] = datetime.now(UTC).isoformat()
+            self.records_emitted += 1
+            self._inc_stat("axisweb/artists_scraped")
+            yield item
+
+    def _discover_search_config(self, response: scrapy.http.Response) -> dict:
+        html = response.text or ""
+        def _attr(name: str):
+            m = re.search(rf'data-{name}=["\']([^"\']+)["\']', html, re.IGNORECASE)
+            return m.group(1).strip() if m else None
+        config = {
+            "app_id": _attr("search-app"),
+            "api_key": _attr("search-key"),
+            "prefix": _attr("search-prefix"),
+            "sections": [],
+            "indexes": [],
+        }
+        section_attr = _attr("config")
+        if section_attr:
+            config["sections"] = [part.strip() for part in re.split(r"[,\s]+", section_attr) if part.strip()]
+        config["indexes"] = self._extract_index_names(html)
+        return config
+
+    def _build_index_candidates(self, discovered: dict) -> list[str]:
+        candidates: list[str] = []
+        sections = discovered.get("sections") or []
+        prefix = self._clean(discovered.get("prefix") or "")
+        for idx in discovered.get("indexes") or []:
+            if idx not in candidates:
+                candidates.append(idx)
+        if prefix and sections:
+            for section in sections:
+                for separator in ("_", "-", ""):
+                    candidate = f"{prefix}{separator}{section}" if separator else f"{prefix}{section}"
+                    if candidate not in candidates:
+                        candidates.append(candidate)
+        for fallback in self.ALGOLIA_INDEX_CANDIDATES:
+            if fallback not in candidates:
+                candidates.append(fallback)
+        return candidates
+
+    def _extract_index_names(self, text: str) -> list[str]:
+        patterns = [
+            r'"indexName"\s*:\s*"([^"]+)"',
+            r'indexName\s*[=:]\s*["\']([^"\']+)["\']',
+            r'"index"\s*:\s*"([^"]+)"',
+            r'indexes?/([A-Za-z0-9_\-]+)',
+        ]
+        names: list[str] = []
+        for pattern in patterns:
+            for match in re.findall(pattern, text, flags=re.IGNORECASE):
+                cleaned = self._clean(match)
+                if cleaned and cleaned not in names:
+                    names.append(cleaned)
+        return names
+
+    def _nearest_letter_group(self, anchor) -> str | None:
+        letter = anchor.xpath("preceding::*[self::h1 or self::h2 or self::h3 or self::h4][1]/text()").get()
+        cleaned = self._clean(letter)
+        return cleaned[:1].upper() if cleaned else None
 
     def _item_from_hit(self, hit: dict) -> ArtistItem | None:
         profile_url = self._extract_hit_url(hit)
