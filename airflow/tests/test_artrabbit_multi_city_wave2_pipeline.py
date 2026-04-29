@@ -117,6 +117,15 @@ def test_dbt_run_includes_expected_models():
     assert EXPECTED_DBT_SELECTION in task.bash_command
 
 
+def test_dbt_run_orders_artist_linking_before_mart_events():
+    dag = _dag()
+    cmd = dag.get_task("dbt_run").bash_command
+    assert cmd.index("int_artist_normalized") < cmd.index("stg_event_artist_candidates")
+    assert cmd.index("stg_event_artist_candidates") < cmd.index("int_event_artist_matches")
+    assert cmd.index("int_event_artist_matches") < cmd.index("mart_event_artists")
+    assert cmd.index("mart_event_artists") < cmd.index("mart_events")
+
+
 def test_apply_superset_views_task_exists():
     dag = _dag()
 
@@ -126,8 +135,6 @@ def test_apply_superset_views_task_exists():
 class _FakeCursor:
     def __init__(self, scripted_results):
         self.scripted_results = list(scripted_results)
-        self.executed = []
-        self._last_result = None
 
     def __enter__(self):
         return self
@@ -136,7 +143,6 @@ class _FakeCursor:
         return False
 
     def execute(self, query, params=None):
-        self.executed.append((query, params))
         self._last_result = self.scripted_results.pop(0)
 
     def fetchone(self):
@@ -166,48 +172,39 @@ def _build_context():
     return {"ti": ti, "execution_date": "2026-04-28T19:53:32.980412+00:00"}
 
 
-def test_validate_raw_ingestion_passes_with_partial_city_coverage(monkeypatch):
-    fake_cursor = _FakeCursor(
-        [
-            (True,),
-            (4,),
-            [("bristol", 2), ("leeds", 2)],
-        ]
-    )
+def _run_validate(monkeypatch, scripted_results):
+    fake_cursor = _FakeCursor(scripted_results)
     monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
+    return pipeline_module.validate_raw_ingestion(**_build_context())
 
-    result = pipeline_module.validate_raw_ingestion(**_build_context())
 
-    assert result["total_events"] == 4
-    assert result["city_counts"]["bristol"] == 2
-    assert result["city_counts"]["leeds"] == 2
+def test_validate_raw_ingestion_strict_rows_pass(monkeypatch):
+    result = _run_validate(monkeypatch, [(3,), (7,), [("bristol", 4), ("leeds", 3)]])
+    assert result["total_events"] == 3
+
+
+def test_validate_raw_ingestion_recent_fallback_passes(monkeypatch):
+    result = _run_validate(monkeypatch, [(0,), (5,), [("birmingham", 5)]])
+    assert result["total_events"] == 5
+
+
+def test_validate_raw_ingestion_mixed_city_casing_passes(monkeypatch):
+    result = _run_validate(monkeypatch, [(0,), (2,), [("bristol", 1), ("dundee", 1)]])
+    assert result["city_counts"]["bristol"] == 1
+    assert result["city_counts"]["dundee"] == 1
+
+
+def test_validate_raw_ingestion_newcastle_zero_does_not_fail(monkeypatch):
+    result = _run_validate(monkeypatch, [(0,), (4,), [("cardiff", 4)]])
     assert result["city_counts"]["newcastle"] == 0
+    assert result["city_counts"]["cardiff"] == 4
 
 
-def test_validate_raw_ingestion_fails_with_zero_total_rows(monkeypatch):
-    fake_cursor = _FakeCursor(
-        [
-            (True,),
-            (0,),
-            [],
-        ]
-    )
-    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
-
+def test_validate_raw_ingestion_fails_when_strict_and_recent_zero(monkeypatch):
     with pytest.raises(ValueError, match=r"Expected > 0 new artrabbit\.com event rows, found 0"):
-        pipeline_module.validate_raw_ingestion(**_build_context())
+        _run_validate(monkeypatch, [(0,), (0,), []])
 
 
-def test_validate_raw_ingestion_logs_zero_count_city(monkeypatch, caplog):
-    fake_cursor = _FakeCursor(
-        [
-            (True,),
-            (3,),
-            [("birmingham", 3)],
-        ]
-    )
-    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
-
-    pipeline_module.validate_raw_ingestion(**_build_context())
-
-    assert "newcastle': 0" in caplog.text
+def test_validate_raw_ingestion_fails_when_no_configured_cities_have_records(monkeypatch):
+    with pytest.raises(ValueError, match=r"Expected at least 1 configured Wave 2 city with records"):
+        _run_validate(monkeypatch, [(2,), (2,), []])
