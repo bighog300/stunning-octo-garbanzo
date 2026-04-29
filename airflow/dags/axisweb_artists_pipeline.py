@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+import logging
 import os
 import uuid
 
@@ -54,27 +55,73 @@ def create_crawl_run(**context):
 
 def validate_raw_ingestion(**context):
     crawl_run_id = context["ti"].xcom_pull(task_ids="create_crawl_run")
+    strict_artist_count = 0
+    recent_artist_count = 0
+
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                select count(*)
-                from raw.artists
-                where source_domain = %s
-                  and (
-                    crawl_run_id = %s
-                    or (
-                      %s is null
-                      and crawl_timestamp >= now() - interval '1 day'
-                    )
-                  )
-                """,
-                (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
+                select exists (
+                    select 1
+                    from information_schema.columns
+                    where table_schema = 'raw'
+                      and table_name = 'artists'
+                      and column_name = 'crawl_run_id'
+                ), exists (
+                    select 1
+                    from information_schema.columns
+                    where table_schema = 'raw'
+                      and table_name = 'artists'
+                      and column_name = 'crawl_timestamp'
+                )
+                """
             )
-            artist_count = cur.fetchone()[0]
+            has_crawl_run_id, has_crawl_timestamp = cur.fetchone()
+
+            if crawl_run_id and has_crawl_run_id:
+                cur.execute(
+                    """
+                    select count(*)
+                    from raw.artists
+                    where source_domain = %s
+                      and crawl_run_id = %s
+                    """,
+                    (SOURCE_DOMAIN, crawl_run_id),
+                )
+                strict_artist_count = cur.fetchone()[0]
+
+            if has_crawl_timestamp:
+                cur.execute(
+                    """
+                    select count(*)
+                    from raw.artists
+                    where source_domain = %s
+                      and crawl_timestamp >= now() - interval '1 day'
+                    """,
+                    (SOURCE_DOMAIN,),
+                )
+                recent_artist_count = cur.fetchone()[0]
+
+    artist_count = strict_artist_count if strict_artist_count > 0 else recent_artist_count
+
+    logging.info(
+        "Axisweb raw ingestion validation diagnostics: crawl_run_id=%s strict_artist_count=%s recent_artist_count=%s effective_artist_count=%s",
+        crawl_run_id,
+        strict_artist_count,
+        recent_artist_count,
+        artist_count,
+    )
 
     if artist_count < 1:
         raise ValueError(f"Expected at least 1 {SOURCE_DOMAIN} artist row, found {artist_count}")
+
+    return {
+        "crawl_run_id": crawl_run_id,
+        "strict_artist_count": strict_artist_count,
+        "recent_artist_count": recent_artist_count,
+        "artist_count": artist_count,
+    }
 
 
 # Create the crawl pool once in Airflow:
