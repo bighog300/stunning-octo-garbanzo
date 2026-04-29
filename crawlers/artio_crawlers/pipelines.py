@@ -1,3 +1,4 @@
+from artio_crawlers.items import ArtistItem
 from itemadapter import ItemAdapter
 from artio_crawlers.db import (
     delete_event_children,
@@ -45,7 +46,20 @@ class PostgresArtworkPipeline:
             self._event_children_reset.add(event_id)
             return item
 
-        if "biography" in data:
+        is_artist_item = isinstance(item, ArtistItem) or (
+            data.get("artist_name")
+            and data.get("source_domain")
+            and data.get("source_url")
+            and "artwork_title" not in data
+            and "event_title" not in data
+            and "artist_name_normalized" not in data
+            and "image_type" not in data
+            and "gallery_name" not in data
+            and "contact_person" not in data
+            and "website_url" not in data
+            and "instagram_url" not in data
+        )
+        if is_artist_item:
             if not data.get("source_url") or not data.get("source_domain"):
                 raise ValueError("source_url and source_domain are required for ArtistItem")
             upsert_artist(self.conn, data)
