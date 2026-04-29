@@ -54,10 +54,11 @@ class AxiswebArtistsSpider(scrapy.Spider):
 
     def start_requests(self):
         if self.use_sample_data:
-            for item in self._sample_items():
-                self.records_emitted += 1
-                self._inc_stat("axisweb/artists_scraped")
-                yield item
+            yield scrapy.Request(
+                "data:text/plain,axisweb-sample",
+                callback=self.parse_sample,
+                dont_filter=True,
+            )
             return
 
         for index_name in self.ALGOLIA_INDEX_CANDIDATES:
@@ -241,3 +242,11 @@ class AxiswebArtistsSpider(scrapy.Spider):
         crawler = getattr(self, "crawler", None)
         if crawler and crawler.stats:
             crawler.stats.inc_value(key, count)
+    def parse_sample(self, response: scrapy.http.Response):
+        del response
+        for item in self._sample_items():
+            if self._limit_reached():
+                break
+            self.records_emitted += 1
+            self._inc_stat("axisweb/artists_scraped")
+            yield item

@@ -9,16 +9,29 @@ def _json_response(url: str, payload: dict, meta: dict | None = None) -> TextRes
     return TextResponse(url=url, request=request, body=json.dumps(payload).encode("utf-8"), encoding="utf-8")
 
 
-def test_sample_mode_yields_artist_item_without_network():
+def test_sample_mode_start_requests_yields_requests_only():
     spider = AxiswebArtistsSpider(use_sample_data=True, max_records=5)
 
     outputs = list(spider.start_requests())
+
+    assert len(outputs) == 1
+    assert isinstance(outputs[0], Request)
+    assert outputs[0].dont_filter is True
+
+
+def test_parse_sample_yields_artist_items_without_network():
+    spider = AxiswebArtistsSpider(use_sample_data=True, max_records=5)
+    response = TextResponse(url="data:text/plain,axisweb-sample", request=Request(url="data:text/plain,axisweb-sample"))
+
+    outputs = list(spider.parse_sample(response))
 
     assert len(outputs) >= 5
     item = outputs[0]
     assert item["source_domain"] == "axisweb.org"
     assert item["artist_name"].startswith("Sample Artist")
     assert item["source_url"].startswith("https://axisweb.org/p/")
+    assert item["source_record_id"]
+    assert isinstance(item["raw_payload"], dict)
 
 
 def test_algolia_response_parsing_yields_artist_item():
