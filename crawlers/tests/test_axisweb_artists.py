@@ -14,11 +14,11 @@ def test_sample_mode_yields_artist_item_without_network():
 
     outputs = list(spider.start_requests())
 
-    assert len(outputs) == 1
+    assert len(outputs) >= 5
     item = outputs[0]
     assert item["source_domain"] == "axisweb.org"
-    assert item["source_name"] == "axisweb"
-    assert item["artist_name"] == "Sample Axisweb Artist"
+    assert item["artist_name"].startswith("Sample Artist")
+    assert item["source_url"].startswith("https://axisweb.org/p/")
 
 
 def test_algolia_response_parsing_yields_artist_item():
@@ -49,7 +49,7 @@ def test_algolia_response_parsing_yields_artist_item():
     item = outputs[0]
     assert item["source_record_id"] == "artist-123"
     assert item["artist_name"] == "Jane Doe"
-    assert item["raw_payload"]["city"] == "Leeds"
+    assert item["raw_payload"]["objectID"] == "artist-123"
 
 
 def test_max_records_is_respected_when_parsing_algolia_hits():

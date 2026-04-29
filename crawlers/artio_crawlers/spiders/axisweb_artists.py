@@ -56,8 +56,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
         if self.use_sample_data:
             for item in self._sample_items():
                 self.records_emitted += 1
+                self._inc_stat("axisweb/artists_scraped")
                 yield item
-            self._set_stat("axisweb/artists_scraped", self.records_emitted)
             return
 
         for index_name in self.ALGOLIA_INDEX_CANDIDATES:
@@ -99,8 +99,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
         if not hits:
             if self._algolia_index_used is None and page == 0:
                 self.logger.info("No hits for candidate index %s", index_name)
-            if self._algolia_index_used is None and index_name == self.ALGOLIA_INDEX_CANDIDATES[-1]:
-                self._set_stat("axisweb/no_hits", 1)
+            self._inc_stat("axisweb/no_hits")
             return
 
         if self._algolia_index_used is None:
@@ -117,9 +116,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
             if not item:
                 continue
             self.records_emitted += 1
+            self._inc_stat("axisweb/artists_scraped")
             yield item
-
-        self._set_stat("axisweb/artists_scraped", self.records_emitted)
 
         if self._limit_reached():
             return
@@ -150,7 +148,6 @@ class AxiswebArtistsSpider(scrapy.Spider):
 
         item = ArtistItem()
         item["crawl_run_id"] = self.crawl_run_id
-        item["source_name"] = "axisweb"
         item["source_domain"] = "axisweb.org"
         item["source_url"] = profile_url
         item["source_record_id"] = source_id
@@ -160,7 +157,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
         item["nationality_text"] = None
         item["biography"] = self._clean(hit.get("biography") or hit.get("description") or hit.get("artist_statement"))
         item["image_url"] = self._canonicalize_url(hit.get("image") or hit.get("image_url") or "") or None
-        item["raw_payload"] = {"city": city, "profile_url": profile_url, "algolia_hit": hit}
+        item["raw_payload"] = hit
         item["content_hash"] = content_hash(profile_url, name, city, source_id)
         item["crawl_timestamp"] = datetime.now(UTC).isoformat()
         return item
@@ -181,21 +178,26 @@ class AxiswebArtistsSpider(scrapy.Spider):
             if not parsed.scheme:
                 cleaned = f"https://www.axisweb.org{cleaned if cleaned.startswith('/') else '/' + cleaned}"
             canonical = self._canonicalize_url(cleaned)
-            if "/artists/" in canonical:
-                return canonical
+            parsed_canonical = urlparse(canonical)
+            if parsed_canonical.netloc and "axisweb.org" not in parsed_canonical.netloc:
+                continue
+            if parsed_canonical.path in {"", "/"}:
+                continue
+            return canonical
         return None
 
     def _sample_items(self):
-        sample_hit = {
-            "objectID": "axisweb-sample-artist-1",
-            "title": "Sample Axisweb Artist",
-            "url": "https://www.axisweb.org/artists/sample-axisweb-artist/",
-            "location": "Leeds",
-            "description": "Sample artist used for deterministic local tests.",
-        }
-        item = self._item_from_hit(sample_hit)
-        if item:
-            yield item
+        sample_hits = [
+            {"objectID": "sample-1", "title": "Sample Artist One", "url": "https://axisweb.org/p/sample-artist-one", "location": "Leeds"},
+            {"objectID": "sample-2", "title": "Sample Artist Two", "url": "https://axisweb.org/p/sample-artist-two", "location": "Sheffield"},
+            {"objectID": "sample-3", "name": "Sample Artist Three", "url": "https://axisweb.org/p/sample-artist-three", "location": "Bristol"},
+            {"objectID": "sample-4", "artist_name": "Sample Artist Four", "url": "https://axisweb.org/p/sample-artist-four", "location": "Cardiff"},
+            {"objectID": "sample-5", "title": "Sample Artist Five", "url": "https://axisweb.org/p/sample-artist-five", "location": "London"},
+        ]
+        for hit in sample_hits:
+            item = self._item_from_hit(hit)
+            if item:
+                yield item
 
     def _canonicalize_url(self, url: str) -> str:
         if not url:
@@ -234,3 +236,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
         crawler = getattr(self, "crawler", None)
         if crawler and crawler.stats:
             crawler.stats.set_value(key, value)
+
+    def _inc_stat(self, key: str, count: int = 1):
+        crawler = getattr(self, "crawler", None)
+        if crawler and crawler.stats:
+            crawler.stats.inc_value(key, count)
