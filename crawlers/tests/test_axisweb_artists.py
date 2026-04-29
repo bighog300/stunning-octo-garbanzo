@@ -52,6 +52,24 @@ def test_algolia_candidates_are_discovered_from_html_config():
     assert "production_artists" in index_names
 
 
+def test_data_config_html_escaped_json_parses_clean_sections_and_filters_bad_candidates():
+    spider = AxiswebArtistsSpider(use_sample_data=False)
+    html = (
+        '<div data-search-prefix="production" '
+        'data-config="{&quot;sections&quot;:[&quot;artists&quot;,&quot;artwork&quot;,&quot;initiative&quot;,&quot;bad section&quot;]}"></div>'
+    )
+    response = _html_response(spider.ARTIST_GALLERY_URL, html)
+
+    discovered = spider._discover_search_config(response)
+    candidates = spider._build_index_candidates(discovered)
+
+    assert discovered["sections"] == ["artists", "artwork", "initiative"]
+    assert "production_artists" in candidates
+    assert "production_artwork" in candidates
+    assert "production_&quot;artwork&quot;" not in candidates
+    assert all('"' not in candidate and "{" not in candidate for candidate in candidates)
+
+
 def test_algolia_404_triggers_directory_fallback_request():
     spider = AxiswebArtistsSpider(max_records=10)
     spider._algolia_pending = 1
@@ -99,3 +117,22 @@ def test_max_records_is_respected_for_directory_fallback():
 
     assert len(outputs) == 1
     assert outputs[0]["source_record_id"] == "one"
+
+
+def test_directory_fallback_accepts_profile_like_links_and_increments_stats():
+    spider = AxiswebArtistsSpider(max_records=10)
+    html = """
+    <main>
+      <a href="/p/jane-doe">Jane Doe</a>
+      <a href="/artist/john-smith">John Smith</a>
+      <a href="/directory-of-artists">Directory</a>
+      <a href="https://example.com/p/not-axis">Not Axis</a>
+    </main>
+    """
+    response = _html_response(spider.DIRECTORY_URL, html)
+
+    outputs = list(spider.parse_directory(response))
+
+    assert len(outputs) == 2
+    assert all(item["artist_name"] for item in outputs)
+    assert all(item["raw_payload"]["source"] == "directory-of-artists" for item in outputs)

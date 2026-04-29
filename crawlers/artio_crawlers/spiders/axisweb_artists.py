@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from html import unescape
 import json
 import re
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -44,6 +45,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
     ]
 
     TRACKING_QUERY_PREFIXES = ("utm_", "gclid", "fbclid", "mc_", "_hs")
+    SAFE_SECTION_PATTERN = re.compile(r"^[A-Za-z0-9_-]+$")
     handle_httpstatus_list = [400, 403, 404]
 
     def __init__(self, crawl_run_id=None, max_pages=5, max_records=100, full_crawl=False, use_sample_data=False, *args, **kwargs):
@@ -197,7 +199,8 @@ class AxiswebArtistsSpider(scrapy.Spider):
         yield scrapy.Request(self.DIRECTORY_URL, callback=self.parse_directory, dont_filter=True)
 
     def parse_directory(self, response: scrapy.http.Response):
-        entries = response.css("a[href*='/artists/'], a[href*='/artist/']")
+        entries = response.css("main a[href], [class*='directory'] a[href], [id*='directory'] a[href], a[href]")
+        links_found = 0
         seen: set[str] = set()
         for anchor in entries:
             if self._limit_reached():
@@ -205,10 +208,13 @@ class AxiswebArtistsSpider(scrapy.Spider):
             href = self._clean(anchor.attrib.get("href"))
             if not href:
                 continue
+            if not self._is_directory_profile_link(href):
+                continue
             source_url = self._canonicalize_url(response.urljoin(href))
             if source_url in seen:
                 continue
             seen.add(source_url)
+            links_found += 1
             artist_name = self._clean(" ".join(anchor.css("::text").getall()))
             if not artist_name:
                 artist_name = self._slug_to_name(urlparse(source_url).path.rstrip("/").split("/")[-1])
@@ -234,6 +240,10 @@ class AxiswebArtistsSpider(scrapy.Spider):
             self.records_emitted += 1
             self._inc_stat("axisweb/artists_scraped")
             yield item
+        self._set_stat("axisweb/directory_links_found", links_found)
+        if links_found == 0:
+            self._inc_stat("axisweb/directory_no_links")
+            self.logger.warning("axisweb/directory_no_links: no artist profile links found in directory fallback")
 
     def _discover_search_config(self, response: scrapy.http.Response) -> dict:
         html = response.text or ""
@@ -249,7 +259,7 @@ class AxiswebArtistsSpider(scrapy.Spider):
         }
         section_attr = _attr("config")
         if section_attr:
-            config["sections"] = [part.strip() for part in re.split(r"[,\s]+", section_attr) if part.strip()]
+            config["sections"] = self._extract_sections(section_attr)
         config["indexes"] = self._extract_index_names(html)
         return config
 
@@ -258,18 +268,61 @@ class AxiswebArtistsSpider(scrapy.Spider):
         sections = discovered.get("sections") or []
         prefix = self._clean(discovered.get("prefix") or "")
         for idx in discovered.get("indexes") or []:
-            if idx not in candidates:
+            if self._is_safe_candidate(idx) and idx not in candidates:
                 candidates.append(idx)
+            elif idx and not self._is_safe_candidate(idx):
+                self.logger.warning("Skipping invalid Algolia index candidate: %s", idx)
         if prefix and sections:
-            for section in sections:
+            ordered_sections = sorted(sections, key=lambda section: 0 if section.lower() == "artists" else 1)
+            for section in ordered_sections:
                 for separator in ("_", "-", ""):
                     candidate = f"{prefix}{separator}{section}" if separator else f"{prefix}{section}"
-                    if candidate not in candidates:
+                    if self._is_safe_candidate(candidate) and candidate not in candidates:
                         candidates.append(candidate)
+                    elif not self._is_safe_candidate(candidate):
+                        self.logger.warning("Skipping invalid Algolia index candidate: %s", candidate)
+            if "artists" in [s.lower() for s in sections] and "artists" not in candidates:
+                candidates.append("artists")
         for fallback in self.ALGOLIA_INDEX_CANDIDATES:
-            if fallback not in candidates:
+            if self._is_safe_candidate(fallback) and fallback not in candidates:
                 candidates.append(fallback)
-        return candidates
+        return sorted(candidates, key=lambda value: (0 if "artist" in value.lower() else 1, value))
+
+    def _extract_sections(self, section_attr: str) -> list[str]:
+        decoded = unescape(section_attr)
+        parsed_sections: list[str] = []
+        try:
+            parsed = json.loads(decoded)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            sections = parsed.get("sections")
+            if isinstance(sections, list):
+                parsed_sections = [self._clean(str(section)) for section in sections if self._clean(str(section))]
+        elif isinstance(parsed, list):
+            parsed_sections = [self._clean(str(section)) for section in parsed if self._clean(str(section))]
+        if not parsed_sections:
+            parsed_sections = [part.strip() for part in re.split(r"[,\s]+", decoded) if part.strip()]
+
+        clean_sections: list[str] = []
+        for section in parsed_sections:
+            if section and self.SAFE_SECTION_PATTERN.fullmatch(section) and section not in clean_sections:
+                clean_sections.append(section)
+            elif section:
+                self.logger.warning("Skipping invalid section value from data-config: %s", section)
+        return clean_sections
+
+    def _is_safe_candidate(self, candidate: str | None) -> bool:
+        return bool(candidate and self.SAFE_SECTION_PATTERN.fullmatch(candidate))
+
+    def _is_directory_profile_link(self, href: str) -> bool:
+        parsed = urlparse(href.strip())
+        if parsed.netloc and "axisweb.org" not in parsed.netloc:
+            return False
+        path = (parsed.path or "").lower()
+        if not path or path in {"/", "/directory-of-artists"}:
+            return False
+        return bool(re.search(r"^/(p|artist|artists)/[^/]+/?$", path))
 
     def _extract_index_names(self, text: str) -> list[str]:
         patterns = [
