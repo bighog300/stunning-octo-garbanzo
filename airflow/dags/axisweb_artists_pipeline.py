@@ -60,7 +60,14 @@ def validate_raw_ingestion(**context):
                 """
                 select count(*)
                 from raw.artists
-                where source_domain = %s and (crawl_run_id = %s or %s is null)
+                where source_domain = %s
+                  and (
+                    crawl_run_id = %s
+                    or (
+                      %s is null
+                      and crawl_timestamp >= now() - interval '1 day'
+                    )
+                  )
                 """,
                 (SOURCE_DOMAIN, crawl_run_id, crawl_run_id),
             )
