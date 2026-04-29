@@ -238,6 +238,22 @@ def test_validate_raw_ingestion_uses_lower_city_filters_and_matching_params(monk
     assert city_counts_params[1] == [cfg["city"] for cfg in pipeline_module.CITY_CONFIGS]
 
 
+def test_validate_raw_ingestion_coerces_logical_date_proxy_to_bindable_str(monkeypatch):
+    class _ProxyLikeLogicalDate:
+        def isoformat(self):
+            return "2026-04-28T19:53:32.980412+00:00"
+
+    fake_cursor = _FakeCursor([(1,), (1,), [("bristol", 1)]])
+    monkeypatch.setattr(pipeline_module, "_conn", lambda: _FakeConn(fake_cursor))
+
+    pipeline_module.validate_raw_ingestion(logical_date=_ProxyLikeLogicalDate())
+
+    strict_query, strict_params = fake_cursor.calls[0]
+    assert "crawl_timestamp >= %s" in strict_query
+    assert strict_params[1] == "2026-04-28T19:53:32.980412+00:00"
+    assert isinstance(strict_params[1], str)
+
+
 def test_validate_raw_ingestion_has_single_total_events_assignment_and_no_forbidden_patterns():
     dag_file = Path("/workspace/stunning-octo-garbanzo/airflow/dags/artrabbit_multi_city_wave2_pipeline.py")
     content = dag_file.read_text()
