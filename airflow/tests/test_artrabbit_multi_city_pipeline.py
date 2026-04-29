@@ -5,6 +5,7 @@ DagBag = airflow_models.DagBag
 
 DAG_ID = "artrabbit_multi_city_pipeline"
 EXPECTED_CITIES = ["london", "manchester", "edinburgh", "glasgow"]
+EXPECTED_DBT_SELECTION = "stg_events stg_galleries int_gallery_normalized int_artist_normalized stg_event_artist_candidates int_event_artist_matches mart_event_artists mart_events mart_galleries"
 
 
 def _dag():
@@ -59,3 +60,10 @@ def test_crawl_tasks_are_chained_sequentially():
     for upstream_task_id, downstream_task_id in zip(expected_chain, expected_chain[1:]):
         upstream = dag.get_task(upstream_task_id)
         assert downstream_task_id in upstream.downstream_task_ids
+
+
+def test_dbt_run_includes_expected_models():
+    dag = _dag()
+    task = dag.get_task("dbt_run")
+
+    assert EXPECTED_DBT_SELECTION in task.bash_command

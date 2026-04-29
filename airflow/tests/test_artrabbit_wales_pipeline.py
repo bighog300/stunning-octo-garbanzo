@@ -5,7 +5,7 @@ DagBag = airflow_models.DagBag
 
 DAG_ID = "artrabbit_wales_pipeline"
 EXPECTED_CITIES = ["cardiff", "swansea", "newport", "bangor", "wrexham"]
-EXPECTED_DBT_SELECTION = "stg_events mart_events stg_galleries int_gallery_normalized mart_galleries"
+EXPECTED_DBT_SELECTION = "stg_events stg_galleries int_gallery_normalized int_artist_normalized stg_event_artist_candidates int_event_artist_matches mart_event_artists mart_events mart_galleries"
 
 
 class _FakeCursor:
