@@ -157,3 +157,25 @@ def test_upsert_artist_sql_does_not_require_source_name_column() -> None:
     query, _ = conn.cursor_ctx.execute_calls[-1]
     assert "source_name" not in query
     assert "artist_name" in query
+
+
+def test_raw_artists_schema_declares_partial_unique_indexes() -> None:
+    schema_sql = open("infra/postgres/init/03_create_raw_tables.sql", encoding="utf-8").read()
+
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_record_id_key" in schema_sql
+    assert "ON raw.artists (source_domain, source_record_id)" in schema_sql
+    assert "WHERE source_record_id IS NOT NULL;" in schema_sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_url_null_record_id_key" in schema_sql
+    assert "ON raw.artists (source_domain, source_url)" in schema_sql
+    assert "WHERE source_record_id IS NULL;" in schema_sql
+
+
+def test_raw_artists_uniqueness_migration_declares_partial_unique_indexes() -> None:
+    migration_sql = open("infra/postgres/init/12_update_raw_artists_uniqueness.sql", encoding="utf-8").read()
+
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_record_id_key" in migration_sql
+    assert "ON raw.artists (source_domain, source_record_id)" in migration_sql
+    assert "WHERE source_record_id IS NOT NULL;" in migration_sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS artists_source_domain_source_url_null_record_id_key" in migration_sql
+    assert "ON raw.artists (source_domain, source_url)" in migration_sql
+    assert "WHERE source_record_id IS NULL;" in migration_sql
